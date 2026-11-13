@@ -47,3 +47,7 @@ Command-line switches: `--tray`, `--select <pid>`, `--memory <pid>`, `--demo-pac
 | `native/make_icon.py` | icon generator |
 | `index.html`, `server.py`, `collector.ps1`, `capture.py` | the first, web-based prototype (superseded by the native app) |
 | `MatrixSys-macOS-prompt.md` | specification for a macOS port |
+
+## License
+
+[MIT](LICENSE)
