@@ -1,0 +1,10 @@
+# build output
+native/out/
+*.obj
+*.res
+*.exe
+*.zip
+
+# local tooling
+.claude/
+__pycache__/

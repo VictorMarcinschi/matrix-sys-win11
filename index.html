@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Matrix // system visualizer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --c:#4fe3ff; --c2:#1b8fd6; --dim:#5d8aa8; --bg:#01060f; --panel:rgba(2,14,28,.82); --line:rgba(79,227,255,.28); --out:#ff4fd8; --warn:#ffb347; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:#bfefff; font:12px/1.45 Consolas,"Cascadia Mono",Menlo,monospace; overflow:hidden; }
+  canvas { display:block; position:fixed; inset:0; }
+  #vig { position:fixed; inset:0; pointer-events:none; background:radial-gradient(ellipse at center, transparent 55%, rgba(0,3,10,.75) 100%), repeating-linear-gradient(0deg, rgba(79,227,255,.025) 0 1px, transparent 1px 3px); }
+  .hud { position:fixed; background:var(--panel); border:1px solid var(--line); backdrop-filter:blur(6px); box-shadow:0 0 18px rgba(27,143,214,.18); }
+  #top { top:12px; left:12px; padding:10px 12px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; max-width:calc(100vw - 24px); }
+  #top h1 { font-size:13px; letter-spacing:.22em; margin:0; color:var(--c); text-shadow:0 0 8px var(--c2); }
+  button { font:inherit; color:var(--c); background:transparent; border:1px solid var(--line); padding:4px 10px; cursor:pointer; letter-spacing:.08em; }
+  button:hover { background:rgba(79,227,255,.12); }
+  button.on { background:rgba(79,227,255,.22); border-color:var(--c); box-shadow:0 0 10px rgba(79,227,255,.35) inset; }
+  input { font:inherit; color:#dff8ff; background:rgba(0,0,0,.35); border:1px solid var(--line); padding:4px 8px; width:150px; outline:none; }
+  input:focus { border-color:var(--c); }
+  #stats { color:var(--dim); } #stats b { color:#dff8ff; font-weight:normal; }
+  #panel { top:64px; right:12px; width:340px; max-height:calc(100vh - 80px); overflow:auto; padding:12px; display:none; }
+  #panel h2 { margin:0 0 2px; font-size:14px; color:var(--c); word-break:break-all; }
+  #panel h3 { margin:12px 0 4px; font-size:11px; letter-spacing:.16em; color:var(--dim); border-bottom:1px solid var(--line); padding-bottom:2px; }
+  #panel .sub { color:var(--dim); word-break:break-all; }
+  #panel table { width:100%; border-collapse:collapse; } #panel td { padding:1px 0; vertical-align:top; } #panel td:first-child { color:var(--dim); width:38%; }
+  .chip { display:inline-block; border:1px solid var(--line); padding:1px 6px; margin:2px 3px 0 0; cursor:pointer; color:#bfefff; }
+  .chip:hover { border-color:var(--c); color:#fff; }
+  .row { display:flex; justify-content:space-between; gap:8px; border-bottom:1px dotted rgba(79,227,255,.12); padding:1px 0; }
+  .row span:last-child { color:var(--dim); text-align:right; white-space:nowrap; }
+  .x { float:right; cursor:pointer; color:var(--dim); } .x:hover { color:#fff; }
+  .warn { color:var(--warn); } .out { color:var(--out); } .in { color:var(--c); }
+  #legend { left:12px; bottom:12px; padding:8px 12px; max-width:440px; color:var(--dim); }
+  #legend b { color:#bfefff; font-weight:normal; }
+  #tip { position:fixed; pointer-events:none; display:none; padding:6px 9px; max-width:340px; z-index:5; }
+  #tip b { color:var(--c); }
+  .lbl { position:fixed; pointer-events:none; color:#9fe9ff; font-size:11px; text-shadow:0 0 6px #003a66, 0 0 2px #000; white-space:nowrap; transform:translate(-50%,-140%); }
+  #msg { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; color:var(--c); letter-spacing:.2em; pointer-events:none; }
+</style>
+</head>
+<body>
+<div id="vig"></div>
+<div id="top" class="hud">
+  <h1>MATRIX//SYS</h1>
+  <span id="tabs">
+    <button data-v="proc" class="on">PROCESSES</button><button data-v="net">NETWORK</button><button data-v="ram">MEMORY</button>
+  </span>
+  <input id="q" placeholder="filter by name…" spellcheck="false">
+  <button id="pause">PAUSE</button>
+  <span id="stats"></span>
+</div>
+<div id="panel" class="hud"></div>
+<div id="legend" class="hud"></div>
+<div id="tip" class="hud"></div>
+<div id="labels"></div>
+<div id="msg">JACKING IN…</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+               "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+const V3 = THREE.Vector3;
+const $ = s => document.querySelector(s);
+
+// ---------- helpers ----------
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function fmtB(b){ if(b<1024) return Math.round(b)+' B'; const u=['KB','MB','GB','TB']; let i=-1; do{ b/=1024; i++; }while(b>=1024&&i<3); return b.toFixed(b<10?1:0)+' '+u[i]; }
+const fmtR = b => fmtB(b)+'/s';
+function hash(s){ let h=2166136261; for(let i=0;i<s.length;i++){ h^=s.charCodeAt(i); h=Math.imul(h,16777619); } return h>>>0; }
+// Palette stays in the cyan–blue band; identity comes from hue + lightness within it.
+function nameColor(name){ const h=hash(name.toLowerCase()); return new THREE.Color().setHSL((168+(h%72))/360, .85, .48+((h>>8)%22)/100); }
+const C = { cyan:new THREE.Color('#4fe3ff'), blue:new THREE.Color('#2a7fff'), out:new THREE.Color('#ff4fd8'), inn:new THREE.Color('#5ff2ff'),
+            warn:new THREE.Color('#ffb347'), udp:new THREE.Color('#8f7bff'), safe:new THREE.Color('#3dffc8'), white:new THREE.Color('#e8fbff'), deep:new THREE.Color('#0d3a66') };
+const isLoop = a => a.startsWith('127.') || a==='::1';
+const isAny = a => a==='0.0.0.0' || a==='::';
+const isPrivate = a => /^(10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|fe80|f[cd])/i.test(a);
+const PORTS = {20:'FTP',21:'FTP',22:'SSH',23:'Telnet',25:'SMTP',53:'DNS',67:'DHCP',68:'DHCP',80:'HTTP',110:'POP3',123:'NTP',135:'RPC',137:'NetBIOS',138:'NetBIOS',139:'NetBIOS',143:'IMAP',443:'HTTPS',445:'SMB',500:'IKE',546:'DHCPv6',587:'SMTP',853:'DoT',993:'IMAPS',995:'POP3S',1433:'MSSQL',1900:'SSDP',3306:'MySQL',3389:'RDP',3702:'WS-Discovery',4500:'IPsec',5040:'CDP',5050:'CDP',5222:'XMPP',5228:'Push',5353:'mDNS',5355:'LLMNR',5432:'Postgres',6379:'Redis',7680:'Delivery Opt.',8080:'HTTP-alt',8443:'HTTPS-alt',27017:'MongoDB'};
+const svcName = p => PORTS[p] || '';
+
+// ---------- scene ----------
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+document.body.prepend(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x01060f);
+scene.fog = new THREE.FogExp2(0x01060f, 0.0019);
+const camera = new THREE.PerspectiveCamera(55, 1, 0.5, 4000);
+camera.position.set(0, 110, 190);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true; controls.dampingFactor = .08; controls.maxDistance = 900;
+function resize(){ renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix(); }
+addEventListener('resize', resize); resize();
+
+function grid(size, div, color, op, y){ const g = new THREE.GridHelper(size, div, color, color); g.material.transparent = true; g.material.opacity = op; g.material.blending = THREE.AdditiveBlending; g.material.depthWrite = false; g.position.y = y; scene.add(g); return g; }
+grid(2400, 60, 0x1b8fd6, .32, -32); grid(2400, 240, 0x0f5c9a, .12, -32.05);
+
+const GEO = { octa:new THREE.OctahedronGeometry(1), ico:new THREE.IcosahedronGeometry(1,0), box:new THREE.BoxGeometry(1,1,1), tetra:new THREE.TetrahedronGeometry(1.2), dodeca:new THREE.DodecahedronGeometry(1) };
+const EDGE = {}; for(const k in GEO) EDGE[k] = new THREE.EdgesGeometry(GEO[k]);
+
+// ---------- layers (one per view) ----------
+const MAXV = 90000, MAXP = 7000;
+function makeLayer(){
+  const group = new THREE.Group(); group.visible = false; scene.add(group);
+  const lg = new THREE.BufferGeometry();
+  lg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(MAXV*3), 3).setUsage(THREE.DynamicDrawUsage));
+  lg.setAttribute('color', new THREE.BufferAttribute(new Float32Array(MAXV*3), 3).setUsage(THREE.DynamicDrawUsage));
+  const lines = new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ vertexColors:true, transparent:true, blending:THREE.AdditiveBlending, depthWrite:false }));
+  lines.frustumCulled = false; group.add(lines);
+  return { group, lines, nodes:new Map(), meshes:[], lanes:new Map(), extra:{} };
+}
+const layers = { proc:makeLayer(), net:makeLayer(), ram:makeLayer() };
+
+function syncNodes(L, descs){
+  const seen = new Set();
+  for(const d of descs){
+    seen.add(d.key);
+    let n = L.nodes.get(d.key);
+    if(!n){
+      const fill = new THREE.MeshBasicMaterial({ transparent:true, blending:THREE.AdditiveBlending, depthWrite:false, side:THREE.DoubleSide });
+      const edge = new THREE.LineBasicMaterial({ transparent:true, blending:THREE.AdditiveBlending, depthWrite:false });
+      const mesh = new THREE.Mesh(GEO[d.shape], fill);
+      mesh.add(new THREE.LineSegments(EDGE[d.shape], edge));
+      mesh.position.copy(d.spawn || d.pos); mesh.scale.setScalar(.001);
+      mesh.rotation.y = (hash(d.key)%628)/100;
+      n = { key:d.key, mesh, fill, edge, tpos:new V3(), tscale:new V3(), op:1, spin:d.shape==='box'?0:(.15+(hash(d.key)%40)/100) };
+      if(d.shape==='box') mesh.rotation.y = 0;
+      mesh.userData.node = n; L.group.add(mesh); L.nodes.set(d.key, n); L.meshes.push(mesh);
+    }
+    n.dead = false; n.d = d; n.tpos.copy(d.pos); n.tscale.copy(d.scale);
+    n.fill.color.copy(d.color); n.edge.color.copy(d.color);
+  }
+  for(const [k,n] of L.nodes) if(!seen.has(k)){ n.dead = true; n.tscale.set(0,0,0); }
+}
+function syncLanes(L, descs){
+  const next = new Map();
+  for(const d of descs){
+    const A = L.nodes.get(d.a), B = L.nodes.get(d.b); if(!A || !B) continue;
+    const old = L.lanes.get(d.key);
+    next.set(d.key, Object.assign({ accO:old?old.accO:Math.random(), accI:old?old.accI:Math.random(), A, B, segs:d.lift?14:1, w:1, lift:0, out:0, inn:0 }, d, { A, B }));
+  }
+  L.lanes = next;
+}
+const S = s => new V3(s,s,s);
+
+// ---------- particles ----------
+const pgeo = new THREE.BufferGeometry();
+pgeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(MAXP*3), 3).setUsage(THREE.DynamicDrawUsage));
+pgeo.setAttribute('pcolor', new THREE.BufferAttribute(new Float32Array(MAXP*3), 3).setUsage(THREE.DynamicDrawUsage));
+pgeo.setAttribute('psize', new THREE.BufferAttribute(new Float32Array(MAXP), 1).setUsage(THREE.DynamicDrawUsage));
+const pmat = new THREE.ShaderMaterial({
+  transparent:true, depthWrite:false, blending:THREE.AdditiveBlending,
+  vertexShader:`attribute vec3 pcolor; attribute float psize; varying vec3 vC;
+    void main(){ vC=pcolor; vec4 mv=modelViewMatrix*vec4(position,1.0); gl_PointSize=max(2.0, psize*(260.0/-mv.z)); gl_Position=projectionMatrix*mv; }`,
+  fragmentShader:`varying vec3 vC; void main(){ float d=length(gl_PointCoord-0.5)*2.0; if(d>1.0) discard; float a=pow(1.0-d,1.6); gl_FragColor=vec4(vC*(0.6+a*1.6), a); }`
+});
+const points = new THREE.Points(pgeo, pmat); points.frustumCulled = false; scene.add(points);
+let parts = [];
+const pps = r => r <= 0 ? 0 : Math.min(16, .35 + Math.log10(1 + r/512) * 2.6);
+function spawn(l, dir, bytes){
+  if(parts.length >= MAXP) return;
+  const len = l.A.mesh.position.distanceTo(l.B.mesh.position);
+  parts.push({ l, dir, bytes, t:0, sp:Math.min(1.5, Math.max(.22, 42/(len+1))) * (.8+Math.random()*.4), x:0, y:0, z:0 });
+}
+const _c = new V3(), _p = new V3(), _q = new V3();
+function ctrl(l, A, B, out){ out.addVectors(A, B).multiplyScalar(.5); if(l.lift) out.y += l.lift * A.distanceTo(B); return out; }
+function bez(A, Cc, B, t, out){ const u = 1-t; return out.set(u*u*A.x+2*u*t*Cc.x+t*t*B.x, u*u*A.y+2*u*t*Cc.y+t*t*B.y, u*u*A.z+2*u*t*Cc.z+t*t*B.z); }
+
+// ---------- state ----------
+let snap = null, view = 'proc', sel = null, hov = null, hovPart = null, focus = null, paused = false, query = '';
+let byPid = new Map(), fly = null;
+// live capture: flows seen on the wire recently, measured per-process network rates, bundles waiting for their lane
+const cap = { on:false, seq:0, live:new Map(), acc:new Map(), rate:new Map(), accT:performance.now(), pending:[], pps:0, unk:0, dirty:false };
+const HOME = { proc:[new V3(0,95,170), new V3(0,12,0)], net:[new V3(0,120,190), new V3(0,10,0)], ram:[new V3(0,150,150), new V3(0,0,0)] };
+
+// ---------- shared socket model ----------
+function socketModel(s){
+  const m = { listen:new Map(), remote:new Map(), loop:new Map(), est:new Map() };   // per pid
+  const add = (map, pid, v) => { let a = map.get(pid); if(!a) map.set(pid, a = []); a.push(v); };
+  const loopIdx = new Map();
+  for(const [la,lp,ra,rp,st,pid] of s.tcp){
+    if(st === 'Listen'){ add(m.listen, pid, { proto:'TCP', addr:la, port:lp }); continue; }
+    if(st === 'Bound' || isAny(ra) || !rp) continue;
+    add(m.est, pid, { la, lp, ra, rp, st });
+    if(isLoop(ra) || ra === la) loopIdx.set(lp, { pid, rp }); else add(m.remote, pid, { la, lp, ra, rp, st });
+  }
+  for(const [lp, e] of loopIdx){ const o = loopIdx.get(e.rp); if(o && o.rp === lp && o.pid !== e.pid && lp < e.rp){ const a = Math.min(e.pid,o.pid), b = Math.max(e.pid,o.pid), k = a+'-'+b; const x = m.loop.get(k) || { a, b, n:0, ports:[] }; x.n++; x.ports.push(lp+'↔'+e.rp); m.loop.set(k, x); } }
+  for(const [la,lp,pid] of s.udp) add(m.listen, pid, { proto:'UDP', addr:la, port:lp });
+  const now = performance.now();
+  for(const [k, f] of cap.live){ if(now - f.t > 12000){ cap.live.delete(k); continue; }
+    const rs = m.remote.get(f.pid); if(rs && rs.some(c => c.ra === f.rip && c.rp === f.rp && c.lp === f.lp)) continue;
+    add(m.remote, f.pid, { la:f.lip, lp:f.lp, ra:f.rip, rp:f.rp, st:f.proto === 'TCP' ? 'recent' : f.proto+' flow', proto:f.proto }); }
+  for(const [pid, arr] of m.listen){ const u = new Map(); for(const x of arr){ const k = x.proto+x.port, o = u.get(k); if(!o) u.set(k, x); else if(isAny(x.addr) || (!isLoop(x.addr) && isLoop(o.addr))) o.addr = x.addr; } m.listen.set(pid, [...u.values()].sort((a,b)=> a.proto===b.proto ? a.port-b.port : (a.proto==='TCP'?-1:1))); }
+  return m;
+}
+const procSize = p => Math.min(2.1, Math.max(.5, .5 + Math.log10(1 + p.ws/1048576) * .5));
+const procTip = p => `<b>${esc(p.name)}</b> · pid ${p.pid}<br>mem ${fmtB(p.ws)} · cpu ${p.cpu.toFixed(1)}% · ${p.th} threads<br><span class="in">▼ ${fmtR(p.rd)}</span> <span class="out">▲ ${fmtR(p.wr)}</span>`;
+
+// ---------- PROCESS VIEW ----------
+function buildProc(s, sm){
+  const L = layers.proc, kids = new Map(), roots = [];
+  for(const p of s.procs){ if(p.ppid && byPid.has(p.ppid)){ let k = kids.get(p.ppid); if(!k) kids.set(p.ppid, k = []); k.push(p); } else roots.push(p); }
+  const sig = s.procs.map(p => p.pid+':'+p.ppid).join(',');
+  if(sig !== L.extra.sig){
+    const lay = new Map(), LEAF = 1.9, LEVEL = 10;
+    const measure = p => { const ks = (kids.get(p.pid) || []).sort((a,b)=>a.pid-b.pid); const o = { r:LEAF, R:0, sum:0 }; lay.set(p.pid, o); if(!ks.length) return o;
+      let mx = 0; for(const k of ks){ const ko = measure(k); o.sum += ko.r*2; mx = Math.max(mx, ko.r); }
+      o.R = ks.length === 1 ? 0 : Math.max(o.sum/(2*Math.PI)*1.08, mx*1.2+.6); o.r = Math.max(LEAF, o.R + mx); return o; };
+    const place = (p, x, y, z) => { const o = lay.get(p.pid); o.pos = new V3(x,y,z); const ks = kids.get(p.pid) || []; let a = (hash(''+p.pid)%628)/100;
+      for(const k of ks){ const ko = lay.get(k.pid), half = ko.r*2/o.sum*Math.PI; a += half; place(k, x+o.R*Math.cos(a), y+LEVEL, z+o.R*Math.sin(a)); a += half; } };
+    roots.forEach(measure);
+    const order = [...roots].sort((a,b) => lay.get(b.pid).r - lay.get(a.pid).r || a.pid-b.pid), placed = [];
+    for(const p of order){ const r = lay.get(p.pid).r; let x = 0, z = 0;
+      for(let k = 0; k < 6000; k++){ const rad = Math.sqrt(k)*2.2, ang = k*2.39996; x = rad*Math.cos(ang); z = rad*Math.sin(ang); if(placed.every(q => Math.hypot(q.x-x, q.z-z) >= q.r+r+2.5)) break; }
+      placed.push({ x, z, r }); place(p, x, -20, z); }
+    L.extra.sig = sig; L.extra.lay = lay; L.extra.ext = Math.max(60, ...placed.map(q => Math.hypot(q.x,q.z)+q.r));
+  }
+  L.extra.kids = kids;
+  const lay = L.extra.lay, nodes = [], lanes = [];
+  const hubNet = new V3(0, 78, 0), hubIO = new V3(0, -30, 0);
+  nodes.push({ key:'hub:net', shape:'ico', pos:hubNet, scale:S(5), color:C.cyan, glow:1, label:'NETWORK', lp:9, tip:()=>`<b>Network gateway</b><br><span class="in">▼ ${fmtR(s.nic.rx)}</span> <span class="out">▲ ${fmtR(s.nic.tx)}</span> (all adapters)` });
+  nodes.push({ key:'hub:io', shape:'dodeca', pos:hubIO, scale:S(4.5), color:C.blue, glow:.8, label:'DISK · PIPES · DEVICES', lp:9, tip:()=>'<b>Local I/O</b><br>file, pipe and device traffic of processes without remote sockets' });
+  for(const p of s.procs){
+    const o = lay.get(p.pid); if(!o) continue;
+    const par = p.ppid && lay.get(p.ppid);
+    nodes.push({ key:'p:'+p.pid, shape:'octa', pos:o.pos, spawn:par ? par.pos : o.pos, scale:S(procSize(p)), color:nameColor(p.name), glow:.35+Math.min(1, p.cpu/8), name:p.name, label:p.name.replace(/\.exe$/i,''), lp:procSize(p)+Math.min(2,p.cpu/5)+(kids.has(p.pid)?.6:0), tip:()=>procTip(p), p });
+    if(par) lanes.push({ key:'t:'+p.pid, a:'p:'+p.ppid, b:'p:'+p.pid, color:C.blue, w:.5, kind:'tree' });
+    const net = (sm.remote.get(p.pid) || []).length > 0, m = cap.rate.get(p.pid) || [0,0];
+    let rd = p.rd, wr = p.wr;
+    if(net){ // with capture on, network dots are real packets and the measured network share is taken off the local I/O estimate
+      lanes.push({ key:'net:'+p.pid, a:'p:'+p.pid, b:'hub:net', color:C.cyan, w:.3, lift:.12, out:cap.on ? 0 : wr, inn:cap.on ? 0 : rd, kind:'net', info:{ proto:'process I/O total', from:p.name, to:'network' } });
+      if(cap.on){ rd = Math.max(0, rd-m[0]); wr = Math.max(0, wr-m[1]); } else rd = wr = 0; }
+    if(rd + wr > 2048) lanes.push({ key:'io:'+p.pid, a:'p:'+p.pid, b:'hub:io', color:C.blue, w:.3, lift:.12, out:wr, inn:rd, kind:'io', info:{ proto:'file / pipe / device', from:p.name, to:'local I/O' } });
+  }
+  for(const x of sm.loop.values()){ const a = byPid.get(x.a), b = byPid.get(x.b); if(!a || !b) continue; const r = Math.min(a.rd+a.wr, b.rd+b.wr)/2;
+    lanes.push({ key:'ipc:'+x.a+'-'+x.b, a:'p:'+x.a, b:'p:'+x.b, color:C.udp, w:.75, lift:.3, out:r/2, inn:r/2, kind:'ipc', info:{ proto:`loopback TCP ×${x.n}`, from:a.name, to:b.name } }); }
+  syncNodes(L, nodes); syncLanes(L, lanes);
+}
+
+// ---------- NETWORK VIEW ----------
+function buildNet(s, sm){
+  const L = layers.net, nodes = [], lanes = [];
+  const pids = [...new Set([...sm.listen.keys(), ...sm.est.keys()])].filter(pid => byPid.has(pid)).sort((a,b) => byPid.get(a).name.localeCompare(byPid.get(b).name) || a-b);
+  const N = pids.length, Rp = Math.max(46, N*7.2/(2*Math.PI)), ang = new Map();
+  nodes.push({ key:'pc', shape:'ico', pos:new V3(0,0,0), scale:S(6), color:C.cyan, glow:1, label:s.host, lp:9, tip:()=>`<b>${esc(s.host)}</b> — this machine<br><span class="in">▼ ${fmtR(s.nic.rx)}</span> <span class="out">▲ ${fmtR(s.nic.tx)}</span><br>${N} processes with sockets` });
+  pids.forEach((pid, i) => {
+    const p = byPid.get(pid), a = i/N*Math.PI*2; ang.set(pid, a);
+    const pos = new V3(Rp*Math.cos(a), 0, Rp*Math.sin(a)), key = 'n:'+pid;
+    const ls = sm.listen.get(pid) || [], rs = sm.remote.get(pid) || [];
+    nodes.push({ key, shape:'octa', pos, scale:S(procSize(p)+.3), color:nameColor(p.name), glow:.4+Math.min(1,(p.rd+p.wr)/200000), name:p.name, label:p.name.replace(/\.exe$/i,''), lp:1+rs.length*.3+ls.length*.05, tip:()=>procTip(p)+`<br>${ls.length} open ports · ${rs.length} remote connections`, p });
+    lanes.push({ key:'spoke:'+pid, a:'pc', b:key, color:C.deep, w:.5, kind:'tree' });
+    const MAXL = 9, shown = ls.slice(0, MAXL);
+    shown.forEach((x, j) => {
+      const more = j === MAXL-1 && ls.length > MAXL ? ls.length-MAXL+1 : 0;
+      const exposed = !isLoop(x.addr), col = x.proto === 'UDP' ? C.udp : (exposed ? C.warn : C.safe);
+      const pk = `port:${pid}:${x.proto}:${x.port}`;
+      nodes.push({ key:pk, shape:x.proto==='UDP'?'tetra':'box', pos:new V3(pos.x, 3.6+j*2.3, pos.z), spawn:pos, scale:S(more ? 1.1 : .85), color:more ? C.blue : col, glow:.7, owner:key, name:p.name,
+        label:more ? `+${more} more` : `${x.port}${svcName(x.port) ? ' '+svcName(x.port) : ''}`, lp:.2, port:x, more,
+        tip:()=> more ? `<b>${more} more open ports</b> on ${esc(p.name)}` : `<b>${x.proto} ${x.port}</b> ${svcName(x.port)}<br>bound to ${esc(x.addr)} — ${isLoop(x.addr) ? 'local only' : (isAny(x.addr) ? 'all interfaces' : 'one interface')}<br>owner ${esc(p.name)} (${pid})` });
+    });
+  });
+  // remote hosts, ordered by the mean angle of their clients to keep lanes short
+  const hosts = new Map();
+  for(const [pid, rs] of sm.remote){ if(!ang.has(pid)) continue; for(const c of rs){ let h = hosts.get(c.ra); if(!h) hosts.set(c.ra, h = { ip:c.ra, conns:[], sx:0, sz:0 }); h.conns.push({ pid, ...c }); h.sx += Math.cos(ang.get(pid)); h.sz += Math.sin(ang.get(pid)); } }
+  const hl = [...hosts.values()].sort((a,b) => Math.atan2(a.sz,a.sx) - Math.atan2(b.sz,b.sx));
+  const Rh = Math.max(Rp + 58, hl.length*6/(2*Math.PI)); L.extra.ext = Rh;
+  hl.forEach((h, i) => {
+    const a0 = Math.atan2(h.sz, h.sx), even = -Math.PI + (i+.5)/hl.length*Math.PI*2, a = hl.length > 24 ? even : a0*.6+even*.4;
+    const priv = isPrivate(h.ip), key = 'host:'+h.ip;
+    nodes.push({ key, shape:'ico', pos:new V3(Rh*Math.cos(a), 16+(i%3)*11, Rh*Math.sin(a)), scale:S(1.3+Math.min(2, h.conns.length*.25)), color:priv ? C.safe : C.cyan, glow:.7, label:h.ip, lp:.8+h.conns.length*.2, host:h,
+      tip:()=>`<b>${esc(h.ip)}</b> ${priv ? '· LAN' : '· internet'}<br>${h.conns.length} connection(s) from ${new Set(h.conns.map(c=>c.pid)).size} process(es)` });
+  });
+  for(const [pid, rs] of sm.remote){
+    if(!ang.has(pid)) continue; const p = byPid.get(pid), per = new Map();
+    for(const c of rs){ let g = per.get(c.ra); if(!g) per.set(c.ra, g = []); g.push(c); }
+    for(const [ip, cs] of per){ const rp = cs[0].rp;
+      lanes.push({ key:`c:${pid}:${ip}`, a:'n:'+pid, b:'host:'+ip, color:cs[0].proto === 'UDP' ? C.udp : C.cyan, w:.55, lift:.22, out:cap.on ? 0 : p.wr/per.size, inn:cap.on ? 0 : p.rd/per.size, kind:'conn',
+        info:{ proto:`${cs[0].proto || 'TCP'}${svcName(rp) ? ' · '+svcName(rp) : ''} :${rp}${cs.length>1 ? ' ×'+cs.length : ''}`, from:p.name, to:ip } }); }
+  }
+  for(const x of sm.loop.values()){ const a = byPid.get(x.a), b = byPid.get(x.b); if(!a || !b || !ang.has(x.a) || !ang.has(x.b)) continue; const r = Math.min(a.rd+a.wr, b.rd+b.wr)/2;
+    lanes.push({ key:'ipc:'+x.a+'-'+x.b, a:'n:'+x.a, b:'n:'+x.b, color:C.udp, w:.6, lift:.28, out:r/2, inn:r/2, kind:'ipc', info:{ proto:`loopback TCP ×${x.n}`, from:a.name, to:b.name } }); }
+  syncNodes(L, nodes); syncLanes(L, lanes);
+}
+
+// ---------- MEMORY VIEW ----------
+function treemap(items, x, z, w, d, out){
+  if(!items.length) return; if(items.length === 1){ out.push({ it:items[0], x, z, w, d }); return; }
+  const tot = items.reduce((a,i) => a+i.v, 0); let acc = items[0].v, i = 1;
+  while(i < items.length-1 && acc + items[i].v/2 < tot/2){ acc += items[i].v; i++; }
+  const f = acc/tot, A = items.slice(0,i), B = items.slice(i);
+  if(w >= d){ treemap(A, x, z, w*f, d, out); treemap(B, x+w*f, z, w*(1-f), d, out); } else { treemap(A, x, z, w, d*f, out); treemap(B, x, z+d*f, w, d*(1-f), out); }
+}
+function buildRam(s){
+  const L = layers.ram, nodes = [], groups = new Map(); let sum = 0;
+  for(const p of s.procs){ let g = groups.get(p.name); if(!g) groups.set(p.name, g = { name:p.name, v:0, ps:[] }); g.v += p.ws; g.ps.push(p); sum += p.ws; }
+  let gl = [...groups.values()].sort((a,b) => b.v-a.v);
+  const small = gl.slice(70); gl = gl.slice(0, 70);
+  if(small.length) gl.push({ name:`${small.length} smaller apps`, v:small.reduce((a,g)=>a+g.v,0), ps:small.flatMap(g=>g.ps), misc:true });
+  const other = Math.max(0, s.mem.total - s.mem.free - sum);
+  const items = [...gl.map(g => ({ v:g.v, g }))];
+  if(other > 0) items.push({ v:other, special:'other' });
+  items.push({ v:Math.max(1, s.mem.free), special:'free' });
+  items.sort((a,b) => b.v-a.v);
+  const W = 170, rects = []; treemap(items, -W/2, -W/2, W, W, rects);
+  const tot = items.reduce((a,i) => a+i.v, 0), H = v => 1.2 + 46*Math.sqrt(v/tot);
+  const selGroup = sel && sel.startsWith('g:') ? sel.slice(2) : (sel && sel.startsWith('rp:') ? (byPid.get(+sel.slice(3)) || {}).name : null);
+  L.extra.groups = groups; L.extra.gl = gl; L.extra.ext = 125;
+  const box = (key, r, h, color, extra, pad=.5) => nodes.push(Object.assign({ key, shape:'box', pos:new V3(r.x+r.w/2, -30+h/2, r.z+r.d/2), scale:new V3(Math.max(.2,r.w-pad), h, Math.max(.2,r.d-pad)), color, glow:.5 }, extra));
+  for(const r of rects){
+    const it = r.it;
+    if(it.special === 'free') box('free', r, .6, C.deep, { label:`FREE ${fmtB(it.v)}`, lp:5, glow:.25, tip:()=>`<b>Free physical memory</b><br>${fmtB(it.v)} of ${fmtB(s.mem.total)}` });
+    else if(it.special === 'other') box('other', r, H(it.v)*.5, C.blue, { label:`KERNEL · CACHE ${fmtB(it.v)}`, lp:4, glow:.3, tip:()=>`<b>Kernel, drivers, file cache</b><br>${fmtB(it.v)} — in use but not in any process working set` });
+    else { const g = it.g, col = g.misc ? C.blue : nameColor(g.name);
+      if(g.name === selGroup && g.ps.length > 1){
+        const sub = []; treemap(g.ps.map(p => ({ v:Math.max(1,p.ws), p })).sort((a,b)=>b.v-a.v), r.x+.4, r.z+.4, r.w-.8, r.d-.8, sub);
+        const c0 = new V3(r.x+r.w/2, -30, r.z+r.d/2);
+        for(const q of sub){ const p = q.it.p; box('rp:'+p.pid, q, H(p.ws)+1.5, nameColor(p.name).clone().lerp(C.white, .25), { spawn:c0, name:p.name, label:`${p.pid} · ${fmtB(p.ws)}`, lp:3+p.ws/g.v, glow:.8, tip:()=>procTip(p), p }, .25); }
+      } else box('g:'+g.name, r, H(g.v), col, { name:g.name, label:`${g.name.replace(/\.exe$/i,'')} ${fmtB(g.v)}`, lp:g.v/tot*40, tip:()=>`<b>${esc(g.name)}</b><br>${fmtB(g.v)} working set · ${g.ps.length} process(es)<br>${(g.v/s.mem.total*100).toFixed(1)}% of RAM`, g });
+    }
+  }
+  syncNodes(L, nodes); syncLanes(L, []);
+}
+
+// ---------- focus / selection ----------
+function computeFocus(){
+  const L = layers[view]; focus = null;
+  if(query){ focus = new Set(); for(const n of L.nodes.values()) if(n.d.name && n.d.name.toLowerCase().includes(query)) focus.add(n.key); if(sel) focus.add(sel); return; }
+  if(!sel || view === 'ram') return;
+  focus = new Set([sel]);
+  const sn = L.nodes.get(sel); if(sn && sn.d.owner) focus.add(sn.d.owner);
+  for(const n of L.nodes.values()) if(n.d.owner === sel) focus.add(n.key);
+  for(const l of L.lanes.values()){ if(l.a === sel) focus.add(l.b); if(l.b === sel) focus.add(l.a); }
+  if(view === 'proc' && sel.startsWith('p:')){
+    const kids = L.extra.kids, down = pid => { for(const k of kids.get(pid) || []){ focus.add('p:'+k.pid); down(k.pid); } };
+    down(+sel.slice(2)); let p = byPid.get(+sel.slice(2)); while(p && p.ppid && byPid.has(p.ppid)){ focus.add('p:'+p.ppid); p = byPid.get(p.ppid); }
+  }
+}
+function select(key, doFly = true){
+  sel = key; if(view === 'ram' && snap) buildRam(snap);
+  computeFocus(); renderPanel();
+  const n = key && layers[view].nodes.get(key);
+  if(n && doFly){ const dist = view === 'ram' ? 90 : 48; const dir = camera.position.clone().sub(controls.target).normalize(); fly = { t:n.tpos.clone(), p:n.tpos.clone().addScaledVector(dir, dist) }; }
+}
+function setView(v, key = null){
+  view = v; for(const k in layers) layers[k].group.visible = k === v; parts = []; hov = hovPart = null;
+  document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.v === v));
+  fly = { p:HOME[v][0].clone(), t:HOME[v][1].clone() };
+  sel = null; if(snap) rebuild(); select(key, !!key); renderLegend();
+}
+
+// ---------- panel ----------
+const chip = (key, text, v) => `<span class="chip" data-sel="${esc(key)}"${v ? ` data-view="${v}"` : ''}>${esc(text)}</span>`;
+function procPanel(p, sm){
+  const pre = view === 'proc' ? 'p:' : view === 'net' ? 'n:' : 'rp:';
+  const kids = snap.procs.filter(k => k.ppid === p.pid), par = byPid.get(p.ppid);
+  const ls = sm.listen.get(p.pid) || [], rs = sm.remote.get(p.pid) || [];
+  const loops = [...sm.loop.values()].filter(x => x.a === p.pid || x.b === p.pid);
+  let h = `<span class="x" data-sel="">✕</span><h2>${esc(p.name)}</h2><div class="sub">pid ${p.pid}${p.svc ? ' · services: '+esc(p.svc) : ''}</div>`;
+  if(p.cmd) h += `<div class="sub" style="margin-top:4px">${esc(p.cmd)}</div>`;
+  h += `<h3>RESOURCES</h3><table><tr><td>working set</td><td>${fmtB(p.ws)}</td></tr><tr><td>private bytes</td><td>${fmtB(p.pv)}</td></tr><tr><td>cpu</td><td>${p.cpu.toFixed(1)}%</td></tr><tr><td>threads / handles</td><td>${p.th} / ${p.hd}</td></tr><tr><td>i/o read</td><td class="in">▼ ${fmtR(p.rd)}</td></tr><tr><td>i/o write</td><td class="out">▲ ${fmtR(p.wr)}</td></tr></table>`;
+  h += `<h3>HIERARCHY</h3>` + (par ? 'parent ' + chip((view==='ram'?'p:':pre)+par.pid, par.name+' '+par.pid, view==='ram'?'proc':'') + '<br>' : '<span class="sub">root process</span><br>');
+  if(kids.length) h += `${kids.length} child(ren)<br>` + kids.map(k => chip('p:'+k.pid, k.name.replace(/\.exe$/i,'')+' '+k.pid, 'proc')).join('');
+  h += `<h3>OPEN PORTS (${ls.length})</h3>` + (ls.length ? ls.slice(0,40).map(x => `<div class="row"><span>${x.proto} ${x.port} ${svcName(x.port)}</span><span class="${isLoop(x.addr) ? '' : 'warn'}">${isLoop(x.addr) ? 'local only' : esc(x.addr)}</span></div>`).join('') + (ls.length > 40 ? `<div class="sub">+${ls.length-40} more</div>` : '') : '<span class="sub">none</span>');
+  h += `<h3>REMOTE CONNECTIONS (${rs.length})</h3>` + (rs.length ? rs.slice(0,40).map(c => `<div class="row"><span>${esc(c.ra)}:${c.rp} ${svcName(c.rp)}</span><span>:${c.lp} ${c.st}</span></div>`).join('') : '<span class="sub">none</span>');
+  if(loops.length) h += `<h3>LOCAL SOCKET LANES (${loops.length})</h3>` + loops.map(x => { const o = byPid.get(x.a === p.pid ? x.b : x.a); return o ? `<div class="row"><span>${chip((view==='ram'?'p:':pre)+o.pid, o.name+' '+o.pid, view==='ram'?'proc':'')}</span><span>×${x.n}</span></div>` : ''; }).join('');
+  h += `<div style="margin-top:10px">` + (view !== 'proc' ? `<button data-sel="p:${p.pid}" data-view="proc">PROCESS TREE</button> ` : '') + (view !== 'net' && (ls.length || rs.length) ? `<button data-sel="n:${p.pid}" data-view="net">NETWORK VIEW</button> ` : '') + (view !== 'ram' ? `<button data-sel="g:${esc(p.name)}" data-view="ram">MEMORY VIEW</button>` : '') + `</div>`;
+  return h;
+}
+function renderPanel(){
+  const el = $('#panel'); if(!sel || !snap){ el.style.display = 'none'; return; }
+  const sm = snap.sm, L = layers[view], n = L.nodes.get(sel); let h = '';
+  const pm = sel.match(/^(p|n|rp):(\d+)$/);
+  if(pm){ const p = byPid.get(+pm[2]); if(!p){ select(null); return; } h = procPanel(p, sm); }
+  else if(sel.startsWith('g:')){ const g = L.extra.groups.get(sel.slice(2)) || (L.extra.gl || []).find(x => x.name === sel.slice(2)); if(!g){ select(null); return; }
+    h = `<span class="x" data-sel="">✕</span><h2>${esc(g.name)}</h2><div class="sub">${fmtB(g.v)} working set · ${(g.v/snap.mem.total*100).toFixed(1)}% of RAM</div><h3>PROCESSES (${g.ps.length})</h3>` +
+      [...g.ps].sort((a,b)=>b.ws-a.ws).slice(0,80).map(p => `<div class="row"><span>${chip('rp:'+p.pid, (g.misc ? p.name+' ' : '')+p.pid)}</span><span>${fmtB(p.ws)} · priv ${fmtB(p.pv)}</span></div>`).join(''); }
+  else if(sel.startsWith('host:') && n){ const hh = n.d.host;
+    h = `<span class="x" data-sel="">✕</span><h2>${esc(hh.ip)}</h2><div class="sub">${isPrivate(hh.ip) ? 'local network' : 'internet host'} · ${hh.conns.length} connection(s)</div><h3>CONNECTIONS</h3>` +
+      hh.conns.map(c => { const p = byPid.get(c.pid); return `<div class="row"><span>${chip('n:'+c.pid, (p ? p.name : '?')+' '+c.pid)}</span><span>:${c.lp} → :${c.rp} ${svcName(c.rp)}</span></div>`; }).join(''); }
+  else if(sel.startsWith('port:') && n){ const x = n.d.port, pid = +sel.split(':')[1], p = byPid.get(pid);
+    h = `<span class="x" data-sel="">✕</span><h2>${x.proto} ${x.port} ${svcName(x.port)}</h2><div class="sub">bound to ${esc(x.addr)} — ${isLoop(x.addr) ? 'reachable from this machine only' : '<span class="warn">reachable from the network (firewall permitting)</span>'}</div><h3>OWNER</h3>${p ? chip('n:'+pid, p.name+' '+pid) : ''}` +
+      (x.proto === 'TCP' ? `<h3>ACCEPTED CONNECTIONS</h3>` + ((sm.est.get(pid) || []).filter(c => c.lp === x.port).map(c => `<div class="row"><span>${esc(c.ra)}:${c.rp}</span><span>${c.st}</span></div>`).join('') || '<span class="sub">none right now</span>') : ''); }
+  else if(n){ h = `<span class="x" data-sel="">✕</span>` + n.d.tip(); }
+  else { el.style.display = 'none'; return; }
+  el.innerHTML = h; el.style.display = 'block';
+}
+$('#panel').addEventListener('click', e => { const t = e.target.closest('[data-sel]'); if(!t) return; const k = t.dataset.sel || null; if(t.dataset.view && t.dataset.view !== view) setView(t.dataset.view, k); else select(k); });
+function renderLegend(){
+  const common = `<br>Dots = bundles of bytes: <span class="in">● inbound/read</span> <span class="out">● outbound/write</span>. ${cap.on ? 'Network dots are <b>captured packets</b> (200 ms bundles per flow); disk, pipe and loopback dots are estimates.' : 'Rates are estimated from process I/O counters. Run <b>python capture.py</b> for real packets (admin).'}<br>Click to select · drag to orbit · wheel to zoom · Esc to clear`;
+  $('#legend').innerHTML = view === 'proc' ? `<b>PROCESS TREE</b> — children rise above their parent; size = memory, glow = CPU. <span style="color:#8f7bff">Violet lanes</span> = local socket links between processes.` + common
+    : view === 'net' ? `<b>NETWORK</b> — inner ring: processes with sockets. Stacks above them: open ports (<span style="color:#3dffc8">■ local only</span> <span class="warn">■ network-reachable</span> <span style="color:#8f7bff">▲ UDP</span>). Outer ring: remote hosts.` + common
+    : `<b>MEMORY</b> — floor area and height = working set per application; select a tower to split it into its processes. Shared pages are counted in each process.<br>Click to select · drag to orbit · wheel to zoom · Esc to clear`;
+}
+
+// ---------- data ----------
+function rebuild(){
+  const tnow = performance.now(), dts = (tnow - cap.accT)/1000; if(dts > .8){ cap.rate = new Map(); let n = 0; for(const [pid, a] of cap.acc){ cap.rate.set(pid, [a[0]/dts, a[1]/dts]); n += a[2]; } cap.pps = Math.round(n/dts); cap.acc = new Map(); cap.accT = tnow; }
+  if(snap) snap.sm = socketModel(snap); cap.dirty = false;
+  if(view === 'proc') buildProc(snap, snap.sm); else if(view === 'net') buildNet(snap, snap.sm); else buildRam(snap); computeFocus();
+  const L = layers[view]; if(!L.extra.framed && L.extra.ext){ L.extra.framed = true; const e = L.extra.ext; HOME[view][0].set(0, e*.6, e*.95); if(!sel) fly = { p:HOME[view][0].clone(), t:HOME[view][1].clone() }; } }
+async function poll(){
+  if(!paused){ try { const r = await fetch('/api/snapshot'); if(r.ok){ const s = await r.json(); if(!snap || s.t !== snap.t){ snap = s; byPid = new Map(s.procs.map(p => [p.pid, p])); rebuild(); renderPanel();
+      $('#msg').style.display = 'none'; const used = s.mem.total - s.mem.free;
+      $('#stats').innerHTML = `<b>${s.procs.length}</b> procs · <b>${s.tcp.length+s.udp.length}</b> sockets · RAM <b>${fmtB(used)}</b>/${fmtB(s.mem.total)} · <span class="in">▼ ${fmtR(s.nic.rx)}</span> <span class="out">▲ ${fmtR(s.nic.tx)}</span> · ` + (cap.on ? `<b style="color:#3dffc8">CAPTURE LIVE</b> ${cap.pps} pkt/s` : 'capture off'); } }
+    } catch(e){ $('#msg').style.display = 'flex'; $('#msg').textContent = 'SIGNAL LOST — IS server.py RUNNING?'; } }
+  setTimeout(poll, 1000);
+}
+
+async function pollPackets(){
+  if(!paused && snap){ try { const r = await fetch('/api/packets?since='+cap.seq); if(r.ok){ const d = await r.json(), was = cap.on; cap.seq = d.seq; cap.on = d.on;
+      if(was !== cap.on){ renderLegend(); cap.dirty = true; if(!cap.on){ cap.live.clear(); cap.rate = new Map(); } }
+      const now = performance.now();
+      for(const [pid, proto, lip, lp, rip, rp, dir, bytes, n] of d.flows){
+        if(!byPid.has(pid) || pid <= 0){ cap.unk += n; continue; }
+        const a = cap.acc.get(pid) || [0,0,0]; a[dir === 'o' ? 1 : 0] += bytes; a[2] += n; cap.acc.set(pid, a);
+        const k = pid+'|'+rip+'|'+rp+'|'+lp; if(!cap.live.has(k)){ cap.dirty = true; cap.live.set(k, { pid, proto, lip, lp, rip, rp, t:now }); } else cap.live.get(k).t = now;
+        cap.pending.push({ pid, proto, lip, lp, rip, rp, dir, bytes, n, t:now }); }
+      if(cap.dirty) rebuild();
+      cap.pending = cap.pending.filter(f => { const L = layers[view], l = view === 'proc' ? L.lanes.get('net:'+f.pid) : view === 'net' ? L.lanes.get(`c:${f.pid}:${f.rip}`) : null;
+        if(l){ spawn(l, f.dir === 'o' ? 1 : -1, f.bytes); parts[parts.length-1].f = f; return false; } return view !== 'ram' && now - f.t < 1500; });
+  } } catch(e){} }
+  setTimeout(pollPackets, 220);
+}
+
+// ---------- interaction ----------
+const ray = new THREE.Raycaster(), mouse = new THREE.Vector2(); let mx = 0, my = 0, down = null;
+const cv = renderer.domElement;
+cv.addEventListener('pointermove', e => { mx = e.clientX; my = e.clientY; pick(); });
+cv.addEventListener('pointerleave', () => { hov = hovPart = null; $('#tip').style.display = 'none'; });
+cv.addEventListener('pointerdown', e => { down = [e.clientX, e.clientY]; });
+cv.addEventListener('pointerup', e => { if(down && Math.hypot(e.clientX-down[0], e.clientY-down[1]) < 5){ pick(); select(hov ? hov.key : null); } down = null; });
+controls.addEventListener('start', () => { fly = null; });
+addEventListener('keydown', e => { if(e.key === 'Escape'){ $('#q').value = ''; query = ''; select(null); } });
+$('#tabs').addEventListener('click', e => { if(e.target.dataset.v) setView(e.target.dataset.v); });
+$('#q').addEventListener('input', e => { query = e.target.value.trim().toLowerCase(); computeFocus(); });
+$('#pause').addEventListener('click', e => { paused = !paused; e.target.classList.toggle('on', paused); e.target.textContent = paused ? 'RESUME' : 'PAUSE'; });
+function pick(){
+  const tip = $('#tip'); hovPart = null; let best = 14;
+  for(const p of parts){ _p.set(p.x, p.y, p.z).project(camera); if(_p.z > 1) continue; const d = Math.hypot((_p.x+1)/2*innerWidth - mx, (1-_p.y)/2*innerHeight - my); if(d < best){ best = d; hovPart = p; } }
+  mouse.set(mx/innerWidth*2-1, -(my/innerHeight)*2+1); ray.setFromCamera(mouse, camera);
+  const hit = ray.intersectObjects(layers[view].meshes, false).find(h => !h.object.userData.node.dead && (!focus || focus.has(h.object.userData.node.key) || true));
+  hov = hit ? hit.object.userData.node : null;
+  let html = '';
+  if(hovPart && hovPart.f){ const f = hovPart.f, o = hovPart.dir > 0, pn = (byPid.get(f.pid) || {}).name || '?', a = `${esc(pn)} ${esc(f.lip)}:${f.lp}`, b = `${esc(f.rip)}:${f.rp}`, sv = svcName(f.rp) || svcName(f.lp);
+    html = `<b>${fmtB(hovPart.bytes)}</b> in ${f.n} packet${f.n > 1 ? 's' : ''} <span class="${o ? 'out' : 'in'}">${o ? '▲ outbound' : '▼ inbound'}</span><br>${f.proto}${sv ? ' · '+sv : ''}<br>${o ? a : b} → ${o ? b : a}<br><span style="color:#5d8aa8">captured on the wire</span>`; }
+  else if(hovPart){ const i = hovPart.l.info || {}, o = hovPart.dir > 0; html = `<b>≈ ${fmtB(hovPart.bytes)}</b> bundle <span class="${o ? 'out' : 'in'}">${o ? '▲ outbound' : '▼ inbound'}</span><br>${esc(i.proto || '')}<br>${esc(o ? i.from : i.to)} → ${esc(o ? i.to : i.from)}<br><span style="color:#5d8aa8">lane rate ${fmtR(o ? hovPart.l.out : hovPart.l.inn)} (estimated)</span>`; }
+  else if(hov) html = hov.d.tip();
+  if(html){ tip.innerHTML = html; tip.style.display = 'block'; tip.style.left = Math.min(mx+16, innerWidth-350)+'px'; tip.style.top = Math.min(my+16, innerHeight-110)+'px'; } else tip.style.display = 'none';
+  cv.style.cursor = hov ? 'pointer' : 'default';
+}
+
+// ---------- labels ----------
+const lblPool = []; for(let i = 0; i < 70; i++){ const d = document.createElement('div'); d.className = 'lbl'; d.style.display = 'none'; $('#labels').appendChild(d); lblPool.push(d); }
+function updateLabels(L){
+  const c = [];
+  for(const n of L.nodes.values()){ const d = n.d; if(n.dead || !d.label) continue; let pr = d.lp || 0;
+    if(focus){ if(focus.has(n.key)) pr += 50; else continue; } if(n.key === sel) pr += 200; if(n === hov) pr += 300;
+    c.push([pr, n]); }
+  c.sort((a,b) => b[0]-a[0]); let u = 0; const taken = [];
+  for(const [, n] of c){ if(u >= lblPool.length) break;
+    _p.copy(n.mesh.position); _p.y += n.mesh.scale.y*(n.d.shape === 'box' ? .5 : 1); _p.project(camera); if(_p.z > 1 || Math.abs(_p.x) > 1.05 || Math.abs(_p.y) > 1.05) continue;
+    const x = (_p.x+1)/2*innerWidth, y = (1-_p.y)/2*innerHeight; if(taken.some(t => Math.abs(t[0]-x) < 64 && Math.abs(t[1]-y) < 13)) continue; taken.push([x,y]);
+    const el = lblPool[u++]; if(el._t !== n.d.label){ el.textContent = el._t = n.d.label; } el.style.display = 'block'; el.style.left = x+'px'; el.style.top = y+'px'; el.style.color = n.key === sel ? '#fff' : ''; }
+  for(; u < lblPool.length; u++) lblPool[u].style.display = 'none';
+}
+
+// ---------- frame ----------
+const clock = new THREE.Clock(); let fc = 0;
+function frame(){
+  requestAnimationFrame(frame);
+  const dt = Math.min(clock.getDelta(), .1), k = 1-Math.exp(-dt*5), L = layers[view], time = clock.elapsedTime;
+  if(fly){ camera.position.lerp(fly.p, k*.8); controls.target.lerp(fly.t, k*.8); if(camera.position.distanceTo(fly.p) < .3) fly = null; }
+  controls.update();
+  // nodes
+  let removed = false;
+  for(const n of L.nodes.values()){
+    n.mesh.position.lerp(n.tpos, k); n.mesh.scale.lerp(n.tscale, k); if(n.spin) n.mesh.rotation.y += n.spin*dt;
+    const target = n.dead ? 0 : (focus && !focus.has(n.key) ? .1 : 1); n.op += (target-n.op)*k;
+    const hi = (n.key === sel ? .9 : 0) + (n === hov ? .5 : 0), g = n.d.glow || .4;
+    n.edge.opacity = Math.min(1, (.45+g*.5+hi)*n.op); n.fill.opacity = Math.min(.85, (.07+g*.16+hi*.25)*n.op);
+    if(n.key === sel) n.edge.color.copy(C.white); else n.edge.color.copy(n.d.color);
+    if(n.dead && n.mesh.scale.x < .02){ L.group.remove(n.mesh); L.nodes.delete(n.key); removed = true; }
+  }
+  if(removed) L.meshes = [...L.nodes.values()].map(n => n.mesh);
+  // lanes
+  const pos = L.lines.geometry.attributes.position.array, col = L.lines.geometry.attributes.color.array; let vi = 0;
+  const slow = hovPart ? .08 : 1;
+  for(const l of L.lanes.values()){
+    const A = l.A.mesh.position, B = l.B.mesh.position; ctrl(l, A, B, _c);
+    const on = !focus || (focus.has(l.a) && focus.has(l.b)), f = (on ? 1 : .05) * l.w * (focus && on && l.kind !== 'tree' ? 1.6 : 1);
+    l.vis = on ? 1 : .08;
+    const r = l.color.r*f, g = l.color.g*f, b = l.color.b*f; _p.copy(A);
+    for(let s = 1; s <= l.segs && vi < MAXV-2; s++){ bez(A, _c, B, s/l.segs, _q);
+      pos[vi*3] = _p.x; pos[vi*3+1] = _p.y; pos[vi*3+2] = _p.z; col[vi*3] = r; col[vi*3+1] = g; col[vi*3+2] = b; vi++;
+      pos[vi*3] = _q.x; pos[vi*3+1] = _q.y; pos[vi*3+2] = _q.z; col[vi*3] = r; col[vi*3+1] = g; col[vi*3+2] = b; vi++; _p.copy(_q); }
+    if(!paused){ const po = pps(l.out), pi = pps(l.inn);
+      if(po){ l.accO += po*dt*slow; while(l.accO >= 1){ l.accO--; spawn(l, 1, l.out/po); } }
+      if(pi){ l.accI += pi*dt*slow; while(l.accI >= 1){ l.accI--; spawn(l, -1, l.inn/pi); } } }
+  }
+  L.lines.geometry.setDrawRange(0, vi); L.lines.geometry.attributes.position.needsUpdate = true; L.lines.geometry.attributes.color.needsUpdate = true;
+  // particles
+  const pp = pgeo.attributes.position.array, pc = pgeo.attributes.pcolor.array, ps = pgeo.attributes.psize.array; let n = 0;
+  for(let i = parts.length-1; i >= 0; i--){ const p = parts[i]; p.t += p.sp*dt*slow;
+    if(p.t >= 1 || !L.lanes.has(p.l.key)){ parts[i] = parts[parts.length-1]; parts.pop(); continue; }
+    const l = L.lanes.get(p.l.key), A = l.A.mesh.position, B = l.B.mesh.position; ctrl(l, A, B, _c); bez(A, _c, B, p.dir > 0 ? p.t : 1-p.t, _q);
+    p.x = _q.x; p.y = _q.y; p.z = _q.z; }
+  for(const p of parts){ if(n >= MAXP) break; const c = p === hovPart ? C.white : (p.dir > 0 ? C.out : C.inn), v = (L.lanes.get(p.l.key) || p.l).vis || 1, fade = Math.min(1, p.t*8, (1-p.t)*8)*v;
+    pp[n*3] = p.x; pp[n*3+1] = p.y; pp[n*3+2] = p.z; pc[n*3] = c.r*fade; pc[n*3+1] = c.g*fade; pc[n*3+2] = c.b*fade;
+    ps[n] = (1.6 + Math.log10(1+p.bytes/1024)*1.1) * (p === hovPart ? 2.2 : 1); n++; }
+  pgeo.setDrawRange(0, n); pgeo.attributes.position.needsUpdate = pgeo.attributes.pcolor.needsUpdate = pgeo.attributes.psize.needsUpdate = true;
+  if(++fc % 2 === 0) updateLabels(L);
+  renderer.render(scene, camera);
+}
+setView('proc'); poll(); pollPackets(); frame();
+window.__dbg = () => ({ view, nodes:layers[view].nodes.size, lanes:layers[view].lanes.size, parts:parts.length, sel });
+</script>
+</body>
+</html>
