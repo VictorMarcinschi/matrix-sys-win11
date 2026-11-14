@@ -2,17 +2,55 @@
 
 A native, fully offline 3D visualizer of a Windows 11 machine: processes, the data they exchange, network traffic, memory, open files, disks and devices, with controls to act on what it shows. Dark scene, glowing blue-cyan wireframes.
 
-![icon](native/matrixsys.png)
+![MatrixSys, Processes tab](docs/screenshots/processes.png)
 
 ## Views
 
-- **Processes** – the process tree in 3D, with lanes for data exchanged between processes.
-- **Network** – processes, their ports and remote hosts; one dot per packet when capture is live.
-- **Memory** – treemap of physical memory by program.
-- **Files** – which process has which files open.
-- **Disks** – every partition, used and free space, broken down by folder recursively.
-- **Devices** – connected hardware, network neighbours, and traffic between them.
-- **Trace** – type a host, an IP address or a URL and pick a protocol (ICMP, TCP, HTTP, HTTPS, DNS; a prefix such as `https://` selects it). Shows the name lookup, every router on the way and the whole conversation as orbs travelling between the nodes, with each request and response decoded (DNS records, TLS handshake and certificate, HTTP headers and body) and viewable as bytes. Enter runs the trace at full speed and replays it; Shift+Enter runs it step by step (Right arrow performs the next real step, Space runs it live or pauses, Left arrow goes back).
+### Processes
+
+The process tree in 3D, with lanes for data exchanged between processes. Size can stand for memory, lane traffic or CPU load.
+
+![Processes tab](docs/screenshots/processes.png)
+
+### Network
+
+Processes, their ports and remote hosts; one dot per packet when capture is live.
+
+![Network tab](docs/screenshots/network.png)
+
+### Files
+
+Which process has which files open.
+
+![Files tab](docs/screenshots/files.png)
+
+### Disks
+
+Every partition, used and free space, broken down by folder recursively.
+
+![Disks tab](docs/screenshots/disks.png)
+
+### Devices
+
+Connected hardware, network neighbours, and traffic between them.
+
+![Devices tab](docs/screenshots/devices.png)
+
+### Memory
+
+Treemap of physical memory by program.
+
+![Memory tab](docs/screenshots/memory.png)
+
+### Trace
+
+Type a host, an IP address or a URL and pick a protocol (ICMP, TCP, HTTP, HTTPS, DNS; a prefix such as `https://` selects it). Shows the name lookup, every router on the way and the whole conversation as orbs travelling between the nodes, with each request and response decoded (DNS records, TLS handshake and certificate, HTTP headers and body) and viewable as bytes. Enter runs the trace at full speed and replays it; Shift+Enter runs it step by step (Right arrow performs the next real step, Space runs it live or pauses, Left arrow goes back).
+
+![Trace tab](docs/screenshots/trace.png)
+
+An HTML response can be shown as a rendered page, with switches for JavaScript, cookies, resources and an XSS guard (see [Rendered pages](#rendered-pages-optional)).
+
+![Rendered page](docs/screenshots/rendered-page.png)
 
 Also: lists of processes by lane traffic and of open ports, a packet viewer with hex dump, a process memory viewer, reverse DNS and owner lookup for remote addresses, and actions (suspend, kill, priority, firewall block, close connection, recycle folder, eject device, and more). Dangerous actions are red and ask for confirmation.
 
