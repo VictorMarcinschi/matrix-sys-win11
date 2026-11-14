@@ -3,6 +3,8 @@
 #include "svc.h"
 #include "disks.h"
 #include "devs.h"
+#include "trace.h"
+#include "web.h"
 #include <deque>
 #include <d3d11.h>
 #include <dxgi1_2.h>
@@ -82,7 +84,7 @@ static const char* protoName(int p) { return p == 6 ? "TCP" : p == 17 ? "UDP" : 
 
 // ================================================================ scene model
 enum { OCTA, ICO, BOX, TETRA };
-enum { K_PROC, K_HUBNET, K_HUBIO, K_PC, K_PORT, K_HOST, K_GROUP, K_FREE, K_OTHER, K_FILE, K_DISK, K_DIR, K_DEV, K_NB };
+enum { K_PROC, K_HUBNET, K_HUBIO, K_PC, K_PORT, K_HOST, K_GROUP, K_FREE, K_OTHER, K_FILE, K_DISK, K_DIR, K_DEV, K_NB, K_TR };
 struct Geo { vector<V3> v; vector<std::pair<int, int>> e; vector<std::array<int, 3>> t; };
 static Geo GEO[4];
 static void buildGeo() {
@@ -115,7 +117,7 @@ struct Layer {
     std::unordered_map<string, Node> nodes; std::unordered_map<string, Lane> lanes; int gen = 0; float ext = 0; bool framed = false;
     uint64_t sig = 0; std::unordered_map<int, Lay> lay; std::unordered_map<int, vector<int>> kids;
 };
-static Layer LY[6];   // 0 processes, 1 network, 2 memory, 3 files, 4 disks, 5 devices
+static Layer LY[7];   // 0 processes, 1 network, 2 memory, 3 files, 4 disks, 5 devices, 6 trace
 static vector<Part> parts;
 static Node& up(Layer& L, const string& key, int shape, int kind, V3 pos, V3 scale, Col c, const V3* spawn = nullptr) {
     auto it = L.nodes.find(key);
@@ -548,7 +550,7 @@ static bool navList(int& cur, float& scroll, int n, int page) {   // moves cur, 
 }
 static int laneSort = 0;   // process list order: 0 all lanes, 1 network, 2 disk reads, 3 disk writes, 4 CPU load
 static int pkFilterPid = -1, pkFilterPort = -1, pkFilterProto = 0; static float portScroll = 0; static string pkFilterIp; static vector<Pkt> pkList; static bool pkFrozen = false, pkHasSel = false; static Pkt pkSel; static float pkScroll = 0, pkHexScroll = 0; static double pkLast = 0;
-static void hexClose() { if (hexProc) CloseHandle(hexProc); hexProc = nullptr; hexMode = 0; g_wantPkts = false; }
+static void hexClose() { webHide(); if (hexProc) CloseHandle(hexProc); hexProc = nullptr; hexMode = 0; g_wantPkts = false; }
 static void hexLoadRegions() {
     hexRegions.clear(); if (!hexProc) return; MEMORY_BASIC_INFORMATION mbi; uint64_t a = 0;
     while (a < 0x7FFFFFFF0000ull && VirtualQueryEx(hexProc, (LPCVOID)a, &mbi, sizeof(mbi)) == sizeof(mbi)) {
@@ -576,6 +578,54 @@ static void hexRead() {
 }
 static string protStr(DWORD p) { switch (p & 0xff) { case PAGE_READONLY: return "R"; case PAGE_READWRITE: return "RW"; case PAGE_WRITECOPY: return "WC"; case PAGE_EXECUTE: return "X"; case PAGE_EXECUTE_READ: return "RX"; case PAGE_EXECUTE_READWRITE: return "RWX"; case PAGE_EXECUTE_WRITECOPY: return "RWXC"; } return "?"; }
 
+// ================================================================ trace view: the path and the conversation with one target
+static Trace TR; static int trVer = -1, trProto = TP_HTTPS, trSel = -1, trHovOrb = -1; static string trInput; static bool trAutoProto = false, trFollow = true;
+static bool trPaused = false, trReveal = false, trWantNext = false; static double trStepT = 0;   // paused replay: one step at a time; trStepT is when the current step started to play
+static vector<float> trSt, trDur; static float trEnd = 0, trPlay = 0, trListScroll = 0, trDetScroll = 0, trFullScroll = 0;
+static Col trCol(const TrMsg& m) {   // requests leave in magenta; every kind of answer has its own colour
+    switch (m.kind) {
+    case TK_DNSR: return C_UDP; case TK_TTLX: return C_WARN; case TK_ECHOR: return C_IN; case TK_SYNACK: return hex(0x4d9bff); case TK_TLSS: return C_SAFE; case TK_BANNER: return C_WHITE;
+    case TK_HTTPR: { size_t sp = m.title.find(' '); int st = sp == string::npos ? 0 : atoi(m.title.c_str() + sp + 1); return st >= 400 ? hex(0xff4b5c) : st >= 300 ? hex(0xffe14f) : hex(0x7dff6b); }
+    case TK_REFUSED: case TK_LOST: return hex(0xff4b5c); case TK_INFO: return m.ms > 0 ? hex(0x7dff6b) : m.ms == 0 ? hex(0xff4b5c) : C_WHITE; case TK_FIN: return m.out ? hex(0xb45fd0) : C_WHITE;
+    }
+    return C_OUT;
+}
+// When each message is replayed. Route probes leave in a quick burst (as they really do); everything else is strictly one after the other.
+static void trSchedule() {
+    size_t n = TR.msgs.size(); trSt.assign(n, 0); trDur.assign(n, .6f); std::unordered_map<int, int> ci; for (size_t i = 0; i < TR.chain.size(); i++) ci[TR.chain[i]] = (int)i;
+    float cur = 0, routeEnd = 0; trEnd = 0;
+    for (size_t i = 0; i < n; i++) { const TrMsg& m = TR.msgs[i]; int segs = 1; auto a = ci.find(m.from), b = ci.find(m.to); if (m.from == m.to) segs = 0; else if (a != ci.end() && b != ci.end()) segs = abs(a->second - b->second);
+        float d = segs == 0 ? .55f : std::min(1.9f, .45f + .1f * segs), st = m.pair >= 0 && m.pair < (int)i ? trSt[m.pair] + trDur[m.pair] : m.phase == 1 ? cur : std::max(cur, routeEnd);
+        trSt[i] = st; trDur[i] = d;
+        if (m.phase == 1) { if (m.out) cur = st + .16f; routeEnd = std::max(routeEnd, st + d + .15f); } else cur = st + d + (m.out ? 0 : .12f);
+        trEnd = std::max(trEnd, st + d); }
+}
+static V3 trChainPos(int i, int n) { float sp = n > 1 ? std::max(std::min(15.f, 210.f / (n - 1)), std::min(42.f, 84.f / (n - 1))) : 0, half = sp * (n - 1) / 2, u = n > 1 ? (float)i / (n - 1) : .5f; return { -half + i * sp, 6 + sinf(u * 3.14159f) * 14, -sinf(u * 3.14159f) * 22 }; }
+static void buildTrace() {
+    Layer& L = LY[6]; L.gen++; vector<Lane> lanes; int n = (int)TR.chain.size(); std::unordered_map<int, V3> pos; for (int i = 0; i < n; i++) pos[TR.chain[i]] = trChainPos(i, n);
+    V3 me = n ? trChainPos(0, n) : V3{ 0, 6, 0 }, last = n ? trChainPos(n - 1, n) : V3{ 0, 6, 0 }; int kd = 0, kt = 0;
+    for (size_t i = 0; i < TR.nodes.size(); i++) if (!pos.count((int)i)) { if (TR.nodes[i].kind == TN_DNS) { pos[(int)i] = n > 2 ? V3{ me.x + 3 + 14.f * kd, me.y + 30, me.z - 24 } : V3{ me.x - 26 - 14.f * kd, me.y + 12, me.z - 10 }; kd++; }   // before the route is known everything stays close
+        else { kt++; pos[(int)i] = n > 1 ? V3{ last.x + 5, last.y + 8 + 15.f * kt, last.z - 20 } : V3{ me.x + 34, me.y + 10.f * (kt - 1), me.z }; } }
+    for (size_t i = 0; i < TR.nodes.size(); i++) { const TrNode& t = TR.nodes[i]; string key = "tr:" + std::to_string(i);
+        int shape = t.kind == TN_ME || t.kind == TN_TARGET ? ICO : t.kind == TN_DNS ? BOX : t.kind == TN_SILENT ? TETRA : OCTA;
+        float sz = t.kind == TN_ME ? 3.2f : t.kind == TN_TARGET ? 3.6f : t.kind == TN_DNS ? 4.2f : t.kind == TN_SILENT ? 1.1f : 1.9f; Col c = t.kind == TN_ME ? C_CYAN : t.kind == TN_TARGET ? C_SAFE : t.kind == TN_DNS ? C_UDP : t.kind == TN_SILENT ? C_DEEP : C_BLUE;
+        sz *= std::max(1.f, std::min(1.7f, (last.x - me.x) / 110));   // long routes are seen from further away
+        Node& nd = up(L, key, shape, K_TR, pos[(int)i], S3(sz), c, &me); nd.cnt = (int)i; nd.s1 = t.ip; nd.name = t.ip + " " + t.name; nd.glow = t.kind == TN_SILENT ? .15f : t.kind == TN_HOP ? .5f : .9f; nd.lp = t.kind == TN_HOP ? 20.f : t.kind == TN_SILENT ? 1.f : 40.f;
+        nd.label = t.kind == TN_ME ? (t.name.empty() ? string("this computer") : t.name) : t.kind == TN_SILENT ? "* hop " + std::to_string(t.ttl) : t.kind == TN_DNS ? (t.ip == "system" ? t.name : "DNS " + t.ip) : t.kind == TN_TARGET ? (t.name.empty() ? t.ip : t.name) : t.ip; }
+    for (int i = 0; i + 1 < n; i++) { Lane l; l.key = "tl:" + std::to_string(i); l.a = "tr:" + std::to_string(TR.chain[i]); l.b = "tr:" + std::to_string(TR.chain[i + 1]); l.color = C_BLUE; l.w = .9f; lanes.push_back(l); }
+    for (auto& k : TR.links) { Lane l; l.key = "tx:" + std::to_string(k.first) + "-" + std::to_string(k.second); l.a = "tr:" + std::to_string(k.first); l.b = "tr:" + std::to_string(k.second); l.color = C_UDP; l.w = .6f; l.lift = .22f; lanes.push_back(l); }
+    L.ext = std::max(55.f, (last.x - me.x) / 2 + 22); endNodes(L); setLanes(L, lanes);
+}
+static void rebuild(); static void trShow(int idx);
+static void trSync() {   // takes over what the trace thread has produced so far
+    int next = -1;
+    { std::lock_guard<std::mutex> l(g_trMx); if (g_tr.ver == trVer) return; size_t before = TR.nodes.size() + TR.chain.size(), oldN = TR.msgs.size(); bool fresh = g_tr.msgs.size() < TR.msgs.size() || g_tr.input != TR.input || (g_tr.msgs.empty() && g_tr.running);
+        TR = g_tr; trVer = TR.ver; if (fresh) { trPaused = g_tr.live; trWantNext = false; oldN = 0; trSel = -1; trPlay = 0; trListScroll = trDetScroll = 0; trFollow = true; if (view == 6) sel.clear(); }
+        if (before != TR.nodes.size() + TR.chain.size()) LY[6].framed = false;
+        if (trWantNext && TR.msgs.size() > oldN) { trWantNext = false; next = (int)oldN; } else if (!TR.running) trWantNext = false; }
+    trSchedule(); if (view == 6 && S) rebuild(); if (next >= 0) trShow(next);   // the step you asked for has happened: show its first message
+}
+
 // ================================================================ focus / selection
 static void computeFocus() {
     Layer& L = LY[view]; focus.clear(); hasFocus = false;
@@ -597,10 +647,10 @@ static void rebuild() {
     double t = nowSec(), dts = t - capAccT;
     if (dts > .8) { capRate.clear(); double n = 0; for (auto& [pid, a] : capAcc) { capRate[pid] = { a[0] / dts, a[1] / dts }; n += a[2]; } capPps = (int)(n / dts); capAcc.clear(); capAccT = t; }
     buildSM(); capDirty = false;
-    if (view == 0) buildProc(); else if (view == 1) buildNet(); else if (view == 3) buildFiles(); else if (view == 4) buildDisks(); else if (view == 5) buildDevs(); else buildRam();
+    if (view == 0) buildProc(); else if (view == 1) buildNet(); else if (view == 3) buildFiles(); else if (view == 4) buildDisks(); else if (view == 5) buildDevs(); else if (view == 6) buildTrace(); else buildRam();
     computeFocus();
     Layer& L = LY[view];
-    if (!L.framed && L.ext > 0) { L.framed = true; if (sel.empty()) { flyT = { 0, view == 2 || view == 4 ? -20.f : 10.f, 0 }; flyDist = L.ext * (view == 2 || view == 4 ? 1.9f : view == 1 || view == 3 ? 1.8f : 1.15f); flying = true; } }
+    if (!L.framed && L.ext > 0) { L.framed = true; if (sel.empty()) { flyT = { 0, view == 2 || view == 4 ? -20.f : 10.f, 0 }; flyDist = L.ext * (view == 2 || view == 4 ? 1.9f : view == 1 || view == 3 ? 1.8f : 1.15f); if (view == 6) { float pf = std::min(.6f, (std::min(500.f, LW * .46f) + 24) / LW), kx = tanf(FOV / 2) * LW / LH; flyDist = std::max(120.f, L.ext / ((1 - pf) * .86f * kx)); flyT = { pf * kx * flyDist, 4, 0 }; } flying = true; } }
 }
 static void requestAction(const string& key);
 static int pendingSel = -1;
@@ -613,6 +663,7 @@ static void selectKey(const string& key, bool fly = true) {
     if (key.rfind("size:", 0) == 0) { procSizeMode = std::max(0, std::min(2, atoi(key.c_str() + 5))); rebuild(); return; }
     if (key == "hexlanes") { hexClose(); if (procSizeMode == 2) laneSort = 4; else if (laneSort == 4) laneSort = 0; hexMode = 4; portScroll = 0; listCur = 0; return; }
     if (key == "dkrescan") { g_dkRescan = true; diskRoot.clear(); sel.clear(); return; }
+    if (view == 6) { sel = key; if (!key.empty()) trSel = -1; trDetScroll = 0; computeFocus(); return; }   // the overview stays put; details go to the panel
     sel = key; if (view == 0 && S) buildProc(); if (view == 2 && S) buildRam(); if (view == 3 && S) buildFiles(); if (view == 4 && S) buildDisks(); computeFocus();
     auto n = LY[view].nodes.find(key);
     if (fly && n != LY[view].nodes.end()) { flyT = n->second.tpos; flyDist = view == 2 || view == 4 ? 90.f : 48.f; flying = true; }
@@ -730,6 +781,10 @@ static vector<TL> nodeTip(const Node& n) {
     case K_FILE: t = { { baseName(n.s1), T_CYAN }, { n.s1, T_TEXT }, { "open in " + std::to_string(n.cnt) + " process(es)", T_DIM } }; break;
     case K_DISK: t = { { "Disk", T_CYAN }, { std::to_string(n.cnt) + " open file handles visible", T_TEXT } }; break;
     case K_GROUP: { char b[64]; snprintf(b, 64, "%.1f%% of RAM", n.v / (double)S->memTotal * 100); t = { { n.name, T_CYAN }, { fmtB(n.v) + " working set \xC2\xB7 " + std::to_string(n.cnt) + " process(es)", T_TEXT }, { b, T_TEXT } }; } break;
+    case K_TR: if (n.cnt < (int)TR.nodes.size()) { const TrNode& x = TR.nodes[n.cnt]; bool hasIp = !x.ip.empty() && x.ip != "system"; string nm = hasIp ? dnsLookup(x.ip) : "";
+        t.push_back({ x.kind == TN_ME ? x.name + " \xE2\x80\x94 this computer" : x.kind == TN_SILENT ? "Hop " + std::to_string(x.ttl) + " \xE2\x80\x94 does not answer" : x.kind == TN_DNS ? (hasIp ? "DNS server " + x.ip : x.name) : x.kind == TN_TARGET ? "Target " + (x.name.empty() ? x.ip : x.name) : "Hop " + std::to_string(x.ttl) + " \xC2\xB7 " + x.ip, T_CYAN });
+        if (hasIp) t.push_back({ x.ip + (isPrivate(x.ip) ? " \xC2\xB7 private network" : " \xC2\xB7 internet") + (nm.empty() || nm == "-" ? "" : " \xC2\xB7 " + nm), T_TEXT }); if (x.ms >= 0) t.push_back({ "round trip " + trMs(x.ms), T_TEXT });
+        int c = 0; for (auto& m : TR.msgs) if (m.from == n.cnt || m.to == n.cnt) c++; t.push_back({ std::to_string(c) + " message(s) \xC2\xB7 click for details", T_DIM }); } break;
     case K_FREE: t = { { "Free physical memory", T_CYAN }, { fmtB(n.v) + " of " + fmtB((double)S->memTotal), T_TEXT } }; break;
     case K_OTHER: t = { { "Kernel, drivers, file cache", T_CYAN }, { fmtB(n.v) + " in use outside process working sets", T_TEXT } }; break;
     }
@@ -1159,12 +1214,189 @@ static void hexDump(float x, float y, uint64_t addr, const uint8_t* d, const uin
         float hx = x + 14 * CW, ax = hx + 52 * CW; text(hx, yy, h0, T_DIM); text(hx, yy, h1, T_TEXT); text(ax, yy, s1, T_CYAN); if (any2) { text(hx, yy, h2, T_OUT); text(ax, yy, s2, T_OUT); }
     }
 }
+// ================================================================ trace view: input bar, step list, decoded details
+static int trWebMsg = -1; static void trOpenRender();
+static D2D1_COLOR_F d2(Col c, float a = 1) { return D2D1::ColorF(c.r, c.g, c.b, a); }
+static void trGo(bool stepByStep = false) { if (trInput.find_first_not_of(' ') == string::npos) return; traceStart(trInput, trProto, stepByStep); }
+static void trInputChanged() { int p = trSchemeProto(trInput); trAutoProto = p >= 0; if (p >= 0) trProto = p; }
+static void trPick(int i) { trSel = i; sel.clear(); computeFocus(); trDetScroll = trFullScroll = 0; trFollow = false; }
+// Pauses the replay on one message and plays just that one. dir -1 / +1 moves to the previous / next message, 0 stays.
+static void trStep(int dir) {
+    int n = (int)TR.msgs.size(); if (!n || (int)trSt.size() != n) return; int idx = trSel;
+    if (idx < 0) { idx = 0; for (int i = 0; i < n; i++) if (trSt[i] <= trPlay) idx = i; } else idx += dir;   // nothing selected yet: start from the message being replayed
+    trShow(std::max(0, std::min(n - 1, idx)));
+}
+static void trShow(int idx) { if (idx < 0 || idx >= (int)trSt.size()) return; trPaused = true; trPick(idx); trPlay = trSt[idx]; trStepT = nowSec(); trReveal = true; }
+// Left / right. In a step-by-step run, stepping past the newest message lets the trace perform its next real step.
+static void trStepKey(int dir) {
+    int n = (int)TR.msgs.size();
+    if (dir > 0 && TR.live && TR.running && (n == 0 || (trPaused && trSel >= n - 1))) { trPaused = true; trWantNext = true; if (g_trWaiting && g_trPermits == 0) g_trPermits = 1; return; }
+    trStep(dir);
+}
+static void trTogglePause() {
+    if (!trPaused) { if (TR.msgs.empty()) trPaused = true; else trStep(0); return; }
+    trPaused = false; trWantNext = false; if (trSel >= 0 && trSel < (int)trSt.size()) trPlay = trSt[trSel];
+    if (TR.live && TR.running) { trSel = -1; trFollow = true; computeFocus(); }   // a live run follows the newest step
+}
+static void trCopy(const string& s, const string& what) { if (!OpenClipboard(hwnd)) return; EmptyClipboard(); wstring w = widen(s); HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, (w.size() + 1) * 2); if (g) { memcpy(GlobalLock(g), w.c_str(), (w.size() + 1) * 2); GlobalUnlock(g); SetClipboardData(CF_UNICODETEXT, g); } CloseClipboard(); toast("Copied " + what, T_SAFE); }
+static string trNodeName(int i) {
+    if (i < 0 || i >= (int)TR.nodes.size()) return "?"; const TrNode& n = TR.nodes[i];
+    return n.kind == TN_ME ? "this computer" : n.kind == TN_SILENT ? "hop " + std::to_string(n.ttl) + " (silent)" : n.kind == TN_DNS ? (n.ip == "system" ? n.name : "DNS server " + n.ip) : n.kind == TN_TARGET ? (n.name.empty() ? n.ip : n.name + " (" + n.ip + ")") : "hop " + std::to_string(n.ttl) + " \xC2\xB7 " + n.ip;
+}
+struct DL { wstring k, s; D2D1_COLOR_F c; float ind; int link; };   // one line of detail text: optional key, text, colour, indent, message to open on click
+static void dlAdd(vector<DL>& o, const string& s, D2D1_COLOR_F c, size_t wrap, float ind = 0, int link = -1) {
+    size_t w = std::max<size_t>(20, wrap - (size_t)(ind / CW)), st = 0;
+    while (st <= s.size()) { size_t e = s.find('\n', st); if (e == string::npos) e = s.size(); string line = s.substr(st, e - st); for (size_t p; (p = line.find('\t')) != string::npos;) line.replace(p, 1, "    ");
+        for (auto& l : wrapText(widen(line), w)) o.push_back({ L"", l, c, ind, link }); st = e + 1; }
+}
+static void dlField(vector<DL>& o, const string& k, const string& v, size_t wrap) {
+    wstring wk = widen(k + "  "), wv = widen(v);
+    if (wk.size() + wv.size() <= wrap && v.find('\n') == string::npos) o.push_back({ wk, wv, uiCol(T_TEXT), 0, -1 });
+    else { o.push_back({ wk, L"", uiCol(T_TEXT), 0, -1 }); dlAdd(o, v, uiCol(T_TEXT), wrap, 14); }
+}
+static void trMsgLines(const TrMsg& m, vector<DL>& o, size_t wrap, bool full) {
+    dlAdd(o, m.title, d2(mix(trCol(m), C_WHITE, .25f)), wrap); char b[64]; snprintf(b, 64, "at %.0f ms", m.t * 1000);
+    dlAdd(o, (m.from == m.to ? "at " + trNodeName(m.to) : trNodeName(m.from) + "  \xE2\x86\x92  " + trNodeName(m.to)) + "  \xC2\xB7  " + b + (m.ms >= 0 && m.kind != TK_INFO ? "  \xC2\xB7  answered in " + trMs(m.ms) : ""), uiCol(T_DIM), wrap);
+    o.push_back({ L"", L"", uiCol(T_DIM), 0, -1 });
+    for (auto& f : m.f) dlField(o, f.first, f.second, wrap);
+    if (!m.body.empty()) { o.push_back({ L"", L"", uiCol(T_DIM), 0, -1 }); dlAdd(o, "CONTENT", uiCol(T_DIM), wrap); string body = m.body; if (!full && body.size() > 1200) body = body.substr(0, 1200) + "\n\xE2\x80\xA6 open the full view for the rest";
+        dlAdd(o, body, uiCol(T_WHITE, .92f), wrap); }
+}
+static void drawDL(const DL& d, float x, float y) { float tx = x + d.ind; if (!d.k.empty()) { text(tx, y, d.k, uiCol(T_CYAN, .9f)); tx += d.k.size() * CW; } if (!d.s.empty()) text(tx, y, d.s, d.c); }
+static void drawTraceBar() {
+    const float x0 = 12, y = 54, w = LW - 24; panelBg(x0, y, w, 34); float x = x0 + 12, by = y + 6;
+    text(x, by + 3, string("TARGET"), T_DIM); x += 54; float iw = std::max(150.f, std::min(460.f, w - 54 - 760)); /* leaves room for the protocol, trace and replay buttons */ size_t maxc = (size_t)((iw - 16) / CW); bool caret = fmod(nowSec(), 1.0) < .55;
+    strokeR(x, by, iw, 22, D2D1::ColorF(0x4fe3ff, .8f));
+    if (trInput.empty()) text(x + 8, by + 3, string(caret ? "_" : " ") + " host, IP or URL, then Enter", T_DIM);
+    else text(x + 8, by + 3, (trInput.size() + 1 > maxc ? "\xE2\x80\xA6" + trInput.substr(trInput.size() - (maxc - 2)) : trInput) + (caret ? "_" : ""), T_WHITE);
+    x += iw + 10; const char* pn[] = { "ICMP", "TCP", "HTTP", "HTTPS", "DNS" };
+    for (int i = 0; i < 5; i++) { if (button(x, by, pn[i], trProto == i)) { if (trAutoProto && trProto != i) toast("The address starts with a protocol, so that one is used. Remove the prefix to choose another.", T_WARN); else trProto = i; } x += 2; }
+    x += 8; if (TR.running) { if (button(x, by, "STOP", false, T_WARN)) traceStop(); } else { if (button(x, by, "TRACE \xE2\x96\xB6", false, T_SAFE)) trGo(); x += 2; if (button(x, by, "STEP BY STEP", false, T_SAFE)) trGo(true); }
+    if (!TR.msgs.empty() || (TR.live && TR.running)) { bool lr = TR.live && TR.running; x += 14; text(x, by + 3, string(lr ? "LIVE" : "REPLAY"), lr ? T_WARN : T_DIM); x += lr ? 38.f : 52.f;
+        if (button(x, by, "\xE2\x97\x80", false)) trStepKey(-1); x += 2; if (button(x, by, trPaused ? "PLAY" : "PAUSE", trPaused, trPaused ? T_WARN : T_CYAN)) trTogglePause(); x += 2; if (button(x, by, "\xE2\x96\xB6", false)) trStepKey(1); }
+    else { x += 12; if (x + 30 * CW < x0 + w) text(x, by + 3, string(trAutoProto ? "protocol taken from the address" : "e.g. https://example.com"), T_DIM); }
+}
+static void drawTracePanel() {
+    const float w = std::min(500.f, LW * .46f), x = LW - w - 12, y0 = 94, h = std::max(220.f, legendTop - y0 - 8); panelBg(x, y0, w, h); const size_t wrap = (size_t)((w - 28) / CW); bool in = inR(x, y0, w, h); float wheel = in ? wheelUi : 0; if (in) wheelUi = 0;
+    float y = y0 + 10; int n = (int)TR.msgs.size();
+    if (TR.input.empty()) {
+        text(x + 12, y, L"Trace", uiCol(T_CYAN), tfBig.Get()); y += 26; vector<DL> dl;
+        dlAdd(dl, "Type a host name, an IPv4 address or a URL, pick a protocol and press Enter. The view shows every step between this computer and the target: the name lookup, each router on the way, and the conversation in the chosen protocol.", uiCol(T_TEXT), wrap);
+        dl.push_back({ L"", L"", uiCol(T_DIM), 0, -1 });
+        dlField(dl, "ICMP", "ping: echo requests and replies", wrap); dlField(dl, "TCP", "opens a connection to a port (host:port) and reads the server's greeting", wrap); dlField(dl, "HTTP", "plain web request, redirects are followed", wrap);
+        dlField(dl, "HTTPS", "TLS handshake, certificate check, then the web request", wrap); dlField(dl, "DNS", "asks the DNS server for every record type of the name", wrap); dl.push_back({ L"", L"", uiCol(T_DIM), 0, -1 });
+        dlAdd(dl, "A prefix selects the protocol by itself:", uiCol(T_TEXT), wrap); for (const char* e : { "https://example.com/page", "http://example.com", "tcp://example.com:22   or   ssh://example.com", "icmp://1.1.1.1", "dns://8.8.8.8/example.com   (ask that server)" }) dlAdd(dl, e, uiCol(T_WHITE), wrap, 14);
+        dl.push_back({ L"", L"", uiCol(T_DIM), 0, -1 }); dlAdd(dl, "Enter runs the trace at full speed and replays it. Shift+Enter runs it step by step: nothing is sent until you press \xE2\x86\x92 (one real step each time) or Space (runs live, each step performed as the view reaches it; Space pauses again). Waiting too long between steps can make the far side give up.", uiCol(T_TEXT), wrap);
+        dl.push_back({ L"", L"", uiCol(T_DIM), 0, -1 }); dlAdd(dl, "This sends real packets to the target: about 30 ICMP probes for the route, then the protocol exchange. Ctrl+V pastes an address.", uiCol(T_DIM), wrap);
+        for (auto& d : dl) { drawDL(d, x + 12, y); y += 15; } return; }
+    text(x + 12, y, widen("TRACE \xC2\xB7 " + (TR.input.size() > 46 ? TR.input.substr(0, 45) + "\xE2\x80\xA6" : TR.input)), uiCol(T_CYAN), tfBig.Get()); y += 22;
+    { int hops = std::max(0, (int)TR.chain.size() - 1); char b[200]; snprintf(b, 200, "%s \xC2\xB7 %d messages \xC2\xB7 %d hop%s", TR.running ? TR.status.c_str() : TR.err.empty() ? "done" : "stopped", n, hops, hops == 1 ? "" : "s"); string s = b; if (!TR.running && TR.took > 0) { snprintf(b, 200, " \xC2\xB7 took %.1f s", TR.took); s += b; }
+        text(x + 12, y, s, TR.running ? T_WARN : TR.err.empty() ? T_SAFE : T_RED); y += 17; }
+    if (!TR.err.empty()) for (auto& l : wrapText(widen(TR.err), wrap)) { text(x + 12, y, l, uiCol(T_RED)); y += 15; }
+    y += 4; if (TR.live && TR.running) text(x + 12, y, trPaused ? string(g_trWaiting ? "STEP BY STEP \xC2\xB7 \xE2\x86\x92 next real step \xC2\xB7 \xE2\x86\x90 back \xC2\xB7 Space runs live" : "STEP BY STEP \xC2\xB7 waiting for the network\xE2\x80\xA6") : string("LIVE \xC2\xB7 steps happen as the view reaches them \xC2\xB7 Space pauses"), trPaused ? T_WARN : T_SAFE);
+    else if (trPaused && trSel >= 0) text(x + 12, y, "REPLAY PAUSED \xC2\xB7 step " + std::to_string(trSel + 1) + " of " + std::to_string(n) + " \xC2\xB7 \xE2\x86\x90 \xE2\x86\x92 step \xC2\xB7 Space plays", T_WARN);
+    else text(x + 12, y, string("STEPS   \xE2\x86\x90 \xE2\x86\x92 step through the replay \xC2\xB7 Space pauses \xC2\xB7 \xE2\x86\x91 \xE2\x86\x93 select"), T_DIM);
+    y += 18;
+    float ly = y; int rows = std::max(4, (int)((h - (y - y0)) * .40f / 15)); bool inList = inR(x, ly, w, rows * 15.f);
+    if ((navKey == VK_UP || navKey == VK_DOWN) && n) { int cur = trSel < 0 ? (navKey == VK_UP ? n : -1) : trSel; navList(cur, trListScroll, n, rows); trPick(cur); trPlay = trSt[cur]; }
+    if (inList && wheel != 0) { trListScroll -= wheel * 3; trFollow = false; } if (trFollow) trListScroll = (float)(n - rows);   // stays on the newest step until you scroll or pick one
+    if (trReveal && trSel >= 0) { if (trSel < (int)trListScroll) trListScroll = (float)trSel; else if (trSel >= (int)trListScroll + rows) trListScroll = (float)(trSel - rows + 1); } trReveal = false;
+    trListScroll = std::max(0.f, std::min(trListScroll, (float)std::max(0, n - rows))); int first = (int)trListScroll;
+    for (int i = 0; i < rows && first + i < n; i++) { int idx = first + i; const TrMsg& m = TR.msgs[idx]; float yy = ly + i * 15; bool hot = inR(x + 6, yy, w - 12, 15), cur = idx == trSel, playing = idx < (int)trSt.size() && trPlay >= trSt[idx] && trPlay < trSt[idx] + trDur[idx];
+        if (hot || cur || playing) fillR(x + 6, yy, w - 12, 15, D2D1::ColorF(0x4fe3ff, cur ? .26f : hot ? .13f : .07f));
+        char tb[24]; snprintf(tb, 24, "%6.0f", m.t * 1000); text(x + 10, yy, string(tb), T_DIM); text(x + 10 + 7 * CW, yy, m.from == m.to ? L"\x25CF" : m.out ? L"\x25B2" : L"\x25BC", d2(trCol(m)));
+        wstring t = widen(m.title); size_t room = wrap - 10; if (t.size() > room) t = t.substr(0, room - 1) + L"\x2026"; text(x + 10 + 9 * CW, yy, t, cur || hot ? uiCol(T_WHITE) : d2(mix(trCol(m), C_WHITE, .4f)));
+        if (hot && clickNow) { trPick(idx); trPlay = trSt[idx]; } }
+    if (!n) text(x + 12, ly, string(TR.running ? "working\xE2\x80\xA6" : "no messages"), T_DIM);
+    y = ly + rows * 15.f + 10; fillR(x + 10, y - 5, w - 20, 1, D2D1::ColorF(0x4fe3ff, .25f));
+    vector<DL> dl; bool buttons = false; int nodeIdx = sel.rfind("tr:", 0) == 0 ? atoi(sel.c_str() + 3) : -1; if (nodeIdx >= (int)TR.nodes.size()) nodeIdx = -1;
+    if (trSel >= 0 && trSel < n) { const TrMsg& m = TR.msgs[trSel]; trMsgLines(m, dl, wrap, false); buttons = true; float bx = x + 12;
+        if (!m.page.empty() && webAvailable()) { if (button(bx, y, "RENDERED PAGE", false, T_SAFE)) { hexClose(); g_web.wantClose = false; hexMode = 6; trWebMsg = -1; } bx += 4; }   // an HTML response: shown as a page when the renderer is installed
+        if (button(bx, y, m.raw.empty() ? "FULL VIEW" : !m.page.empty() ? "TEXT + BYTES" : "FULL VIEW + BYTES", false)) { hexClose(); hexMode = 5; trFullScroll = 0; } bx += 4;
+        if (button(bx, y, "COPY TEXT", false)) { string all; for (auto& d : dl) all += narrow((d.k + d.s).c_str()) + "\r\n"; trCopy(all, "the decoded message"); } }
+    else if (nodeIdx >= 0) { const TrNode& t = TR.nodes[nodeIdx]; bool hasIp = !t.ip.empty() && t.ip != "system"; dlAdd(dl, trNodeName(nodeIdx), uiCol(T_WHITE), wrap);
+        dlAdd(dl, t.kind == TN_ME ? "Where every request starts and every answer ends." : t.kind == TN_DNS ? "Translates names into addresses." : t.kind == TN_TARGET ? "The machine you asked for." : t.kind == TN_SILENT ? "A router that forwards traffic but does not answer probes." : "A router on the way. It forwards the packets and answered the probe sent with this hop count.", uiCol(T_DIM), wrap);
+        dl.push_back({ L"", L"", uiCol(T_DIM), 0, -1 }); if (hasIp) { dlField(dl, "address", t.ip + (isPrivate(t.ip) ? "  (private network)" : ""), wrap); string nm = dnsLookup(t.ip); dlField(dl, "host name", nm.empty() ? "resolving\xE2\x80\xA6" : nm == "-" ? "none (no reverse DNS record)" : nm, wrap);
+            std::lock_guard<std::mutex> l(dnsMx); auto wi = whoisRes.find(t.ip); if (wi != whoisRes.end()) dlField(dl, "owner", wi->second + (isPrivate(t.ip) ? "  \xE2\x80\x94 a reserved private range: the device belongs to your own network" : ""), wrap); }
+        if (t.ttl) dlField(dl, "hop number", std::to_string(t.ttl), wrap); if (t.ms >= 0) dlField(dl, "round trip", trMs(t.ms), wrap); if (!t.note.empty()) dlField(dl, "note", t.note, wrap);
+        dl.push_back({ L"", L"", uiCol(T_DIM), 0, -1 }); dlAdd(dl, "MESSAGES TO AND FROM IT", uiCol(T_DIM), wrap);
+        for (int i = 0; i < n; i++) if (TR.msgs[i].from == nodeIdx || TR.msgs[i].to == nodeIdx) { string tt = TR.msgs[i].title; if (tt.size() > wrap - 4) tt = tt.substr(0, wrap - 5) + "\xE2\x80\xA6"; dl.push_back({ L"", widen("\xE2\x80\xBA " + tt), d2(mix(trCol(TR.msgs[i]), C_WHITE, .4f)), 0, i }); }
+        if (hasIp) { buttons = true; float bx = x + 12; if (button(bx, y, "WHO OWNS IT", false)) requestAction("act:whois:" + t.ip); bx += 4; if (button(bx, y, "COPY ADDRESS", false)) requestAction("act:copy:" + t.ip); } }   // every node with an address, private ones included (the registry names the reserved range)
+    else { dlAdd(dl, "ROUTE", uiCol(T_DIM), wrap);
+        for (size_t i = 0; i < TR.chain.size(); i++) { const TrNode& t = TR.nodes[TR.chain[i]]; string nm = t.ip.empty() || t.ip == "system" ? "" : dnsLookup(t.ip); if (nm == "-") nm.clear(); if (t.kind == TN_TARGET && !t.name.empty()) nm = t.name; if (t.kind == TN_ME) nm = t.name + " (this computer)";
+            char b[200]; snprintf(b, 200, "%2d  %-15s %8s  %s", (int)i, t.kind == TN_SILENT ? "*" : t.ip.c_str(), t.ms >= 0 ? trMs(t.ms).c_str() : "", nm.c_str()); string s = b; if (s.size() > wrap) s = s.substr(0, wrap - 1) + "\xE2\x80\xA6";
+            dl.push_back({ L"", widen(s), uiCol(t.kind == TN_SILENT ? T_DIM : t.kind == TN_TARGET ? T_SAFE : T_TEXT), 0, -1 }); }
+        dl.push_back({ L"", L"", uiCol(T_DIM), 0, -1 }); dlAdd(dl, "Select a step above, or click a node or a moving orb, to see what was said. Hovering an orb slows the replay.", uiCol(T_DIM), wrap); }
+    float dy = y + (buttons ? 30 : 2), dh = y0 + h - dy - 8; int vis = std::max(1, (int)(dh / 15)); bool inDet = inR(x, dy, w, dh); if (inDet) trDetScroll -= wheel * 3;
+    trDetScroll = std::max(0.f, std::min(trDetScroll, (float)std::max(0, (int)dl.size() - vis))); int f0 = (int)trDetScroll, pend = -1;
+    dc->PushAxisAlignedClip(D2D1::RectF(x, dy, x + w, dy + dh), D2D1_ANTIALIAS_MODE_ALIASED);
+    for (int i = 0; i <= vis && f0 + i < (int)dl.size(); i++) { const DL& d = dl[f0 + i]; float yy = dy + i * 15; if (d.link >= 0) { bool hot = inDet && inR(x + 6, yy, w - 12, 15); if (hot) { fillR(x + 6, yy, w - 12, 15, D2D1::ColorF(0x4fe3ff, .13f)); if (clickNow) pend = d.link; } } drawDL(d, x + 12, yy); }
+    dc->PopAxisAlignedClip(); if (pend >= 0) { trPick(pend); trPlay = trSt[pend]; }
+}
+// one message over the whole window: everything decoded, then the bytes that were seen
+static void drawTraceFull(float X0, float Y0, float Wd, float top, int rows, float wheel) {
+    int n = (int)TR.msgs.size(); if (trSel < 0 || trSel >= n) { hexMode = 0; return; }
+    if (navKey == VK_LEFT && trSel > 0) { trSel--; trFullScroll = 0; } else if (navKey == VK_RIGHT && trSel + 1 < n) { trSel++; trFullScroll = 0; }
+    const TrMsg& m = TR.msgs[trSel]; size_t wrap = (size_t)((Wd - 30) / CW); vector<DL> dl; trMsgLines(m, dl, wrap, true);
+    text(X0 + 12, Y0 + 9, widen("MESSAGE " + std::to_string(trSel + 1) + " OF " + std::to_string(n) + "   \xC2\xB7   \xE2\x86\x90 \xE2\x86\x92 previous / next   \xC2\xB7   \xE2\x86\x91 \xE2\x86\x93 PgUp PgDn scroll   \xC2\xB7   Esc closes"), uiCol(T_CYAN), tfBig.Get());
+    if (!m.page.empty()) { if (webAvailable()) { float bx = X0 + Wd - 66 - 14 * CW - 30; if (button(bx, Y0 + 8, "RENDERED PAGE", false, T_SAFE)) { trOpenRender(); return; } } else text(X0 + 12, Y0 + 27, "Shown as text. " + g_web.why, T_DIM); }
+    int hexN = (int)((m.raw.size() + 15) / 16), total = (int)dl.size() + (hexN ? hexN + 4 : 0);
+    if (navKey == VK_UP) trFullScroll -= 1; else if (navKey == VK_DOWN) trFullScroll += 1; else if (navKey == VK_PRIOR) trFullScroll -= rows - 1; else if (navKey == VK_NEXT) trFullScroll += rows - 1; else if (navKey == VK_HOME) trFullScroll = 0; else if (navKey == VK_END) trFullScroll = (float)total;
+    trFullScroll = std::max(0.f, std::min(trFullScroll - wheel * 3, (float)std::max(0, total - rows)));
+    for (int i = 0; i < rows; i++) { int li = (int)trFullScroll + i; float yy = top + i * 15; if (li < (int)dl.size()) { drawDL(dl[li], X0 + 12, yy); continue; } int hi = li - (int)dl.size(); if (!hexN || hi >= hexN + 4) break;
+        if (hi == 1) text(X0 + 12, yy, "BYTES \xE2\x80\x94 " + (m.rawTotal > m.raw.size() ? "first " + std::to_string(m.raw.size()) + " of " + std::to_string(m.rawTotal) : std::to_string(m.raw.size())) + (m.kind == TK_HTTPQ || m.kind == TK_HTTPR ? " (application data; on an HTTPS connection this is the content before / after encryption)" : ""), T_DIM);
+        else if (hi == 3) text(X0 + 12, yy, string(HEX_HDR), T_DIM);
+        else if (hi >= 4) { size_t o = (size_t)(hi - 4) * 16; hexDump(X0 + 12, yy, o, m.raw.data() + o, nullptr, nullptr, std::min<size_t>(16, m.raw.size() - o), 0); } }
+}
+static vector<TL> trOrbTip(const TrMsg& m) {
+    auto cut = [](string s, size_t n) { if (s.size() > n) s = s.substr(0, n - 1) + "\xE2\x80\xA6"; return s; };
+    vector<TL> t = { { cut(m.title, 100), m.out ? T_OUT : T_WHITE }, { m.from == m.to ? "at " + trNodeName(m.to) : trNodeName(m.from) + "  \xE2\x86\x92  " + trNodeName(m.to), T_TEXT } };
+    for (size_t i = 0; i < m.f.size() && i < 5; i++) t.push_back({ cut(m.f[i].first + ": " + m.f[i].second, 100), T_DIM });
+    t.push_back({ "click for everything that was said", T_CYAN }); return t;
+}
+// ---- rendered page (optional WebView2 component): the captured HTML response, shown with the safety options chosen here
+static WebOpts trWebOpts;
+static RECT trWebRect() { const float X0 = 12, Y0 = 58, Wd = LW - 24, Ht = std::max(200.f, legendTop - 8 - Y0); return { (LONG)((X0 + 8) * uiScale), (LONG)((Y0 + 98) * uiScale), (LONG)((X0 + Wd - 8) * uiScale), (LONG)((Y0 + Ht - 8) * uiScale) }; }
+static bool trCanRender(int i) { return i >= 0 && i < (int)TR.msgs.size() && !TR.msgs[i].page.empty() && webAvailable(); }
+static void trOpenRender() { hexClose(); g_web.wantClose = false; hexMode = 6; trWebMsg = -1; }
+static void drawTraceRender(float X0, float Y0, float Wd) {
+    int n = (int)TR.msgs.size(); if (g_web.wantClose) { hexClose(); return; }
+    if (navKey == VK_LEFT && trSel > 0) trSel--; else if (navKey == VK_RIGHT && trSel + 1 < n) trSel++;
+    if (!trCanRender(trSel)) { bool any = trSel >= 0 && trSel < n; hexClose(); if (any) { hexMode = 5; trFullScroll = 0; } return; }   // no page here, or no renderer: the text view takes over
+    const TrMsg& m = TR.msgs[trSel]; WebState& w = g_web;
+    if (trWebMsg != trSel) { trWebMsg = trSel; w.o = trWebOpts; webShow(hwnd, trWebRect(), m.url, m.ctype, m.csp, m.page); } else webBounds(trWebRect());
+    string url = m.url.size() > 90 ? m.url.substr(0, 89) + "\xE2\x80\xA6" : m.url; text(X0 + 12, Y0 + 9, widen("RENDERED PAGE \xC2\xB7 " + url), uiCol(T_CYAN), tfBig.Get());
+    float bx = X0 + 12, by = Y0 + 36; bool ch = false;
+    auto tog = [&](const char* name, bool& v, bool risky, bool enabled = true) { if (button(bx, by, string(name) + (v ? ": ON" : ": OFF"), v && enabled, !enabled ? T_DIM : risky ? T_WARN : T_SAFE) && enabled) { v = !v; ch = true; } bx += 4; };
+    tog("JAVASCRIPT", trWebOpts.js, trWebOpts.js); tog("COOKIES", trWebOpts.cookies, trWebOpts.cookies); tog("LOAD RESOURCES", trWebOpts.resources, trWebOpts.resources);
+    tog("OTHER SITES", trWebOpts.thirdParty, trWebOpts.thirdParty, trWebOpts.resources); tog("XSS GUARD", trWebOpts.xssGuard, !trWebOpts.xssGuard);
+    bx += 10; if (button(bx, by, "TEXT + BYTES", false)) { hexClose(); hexMode = 5; trFullScroll = 0; return; } bx += 4; if (button(bx, by, "CLEAR COOKIES", false)) { webClearCookies(); toast("The renderer's cookie store is empty", T_SAFE); }
+    if (ch) { w.o = trWebOpts; webNavigate(); }
+    const char* tip = nullptr;   // what each switch does, under the cursor
+    if (mouseY >= by && mouseY < by + 22) { float tx = X0 + 12; const struct { const char* name; bool v; const char* tip; } T[] = {
+            { "JAVASCRIPT", trWebOpts.js, "Scripts in the page may run. Off: the page is static, as delivered." },
+            { "COOKIES", trWebOpts.cookies, "On: cookies are kept in the renderer's own store between pages. Off: the store is emptied before and after each page and scripts see no cookies." },
+            { "LOAD RESOURCES", trWebOpts.resources, "On: images, styles, fonts and scripts are fetched from the network (new, real requests). Off: only the captured document is shown." },
+            { "OTHER SITES", trWebOpts.thirdParty, "On: resources from other sites load too (third parties, trackers, CDNs). Off: only the page's own site." },
+            { "XSS GUARD", trWebOpts.xssGuard, "On: only script files from the page's own site may run; inline scripts and scripts from other sites are blocked (Content-Security-Policy)." } };
+        for (auto& t : T) { float bw = (strlen(t.name) + (t.v ? 4 : 5)) * CW + 18; if (mouseX >= tx && mouseX < tx + bw) tip = t.tip; tx += bw + 4; } }
+    if (!w.ready) text(X0 + 12, Y0 + 63, string(w.failed ? w.why : "starting the page engine\xE2\x80\xA6"), T_WARN);
+    else if (tip) text(X0 + 12, Y0 + 63, string(tip), T_WHITE);
+    else text(X0 + 12, Y0 + 63, string("This is the response the trace captured; it is not fetched again. Always blocked: links and redirects, popups, downloads, permission prompts, script dialogs."), T_DIM);
+    { string s = std::to_string(w.loadedN) + " resource request(s) allowed \xC2\xB7 " + std::to_string(w.blocked) + " blocked"; if (!w.blockedHosts.empty()) { s += " (" + std::to_string(w.blockedHosts.size()) + (w.blockedHosts.size() > 1 ? " hosts: " : " host: "); int k = 0; for (auto& h : w.blockedHosts) { if (k == 3) { s += ", \xE2\x80\xA6"; break; } s += (k ? ", " : "") + h; k++; } s += ")"; }
+        if (w.cookieCount >= 0) s += " \xC2\xB7 cookies in the store: " + std::to_string(w.cookieCount); if (w.loaded && !w.loadOk) s += " \xC2\xB7 the page did not load completely";
+        size_t room = (size_t)((Wd - 24) / CW); if (s.size() > room) s = s.substr(0, room - 1) + "\xE2\x80\xA6"; text(X0 + 12, Y0 + 79, s, w.blocked ? T_WARN : T_TEXT); }
+    if (!w.blockedNav.empty()) { string u = narrow(w.blockedNav.c_str()); w.blockedNav.clear(); bool ok = u.rfind("http", 0) == 0 && u.size() < 240; for (unsigned char c : u) if (c < 33 || c > 126) ok = false;
+        if (ok) { trInput = u; trInputChanged(); toast("Navigation is blocked in this view. The address is in the TARGET box: close the page and press Enter to trace it.", T_WARN); } else toast("Navigation is blocked in this view.", T_WARN); }
+}
 static void drawHex() {
     const float X0 = 12, Y0 = 58, Wd = LW - 24, Ht = std::max(200.f, legendTop - 8 - Y0), LWd = 330; panelBg(X0, Y0, Wd, Ht); fillR(X0 + 1, Y0 + 1, Wd - 2, Ht - 2, D2D1::ColorF(0x020a16, .93f));
     bool in = inR(X0, Y0, Wd, Ht); float wheel = in ? wheelUi : 0; if (in) wheelUi = 0;
     { float bx = X0 + Wd - 66; if (button(bx, Y0 + 8, "CLOSE", false)) { hexClose(); return; } }
     float top = Y0 + 42, listH = Ht - 52, hx = X0 + LWd + 14; int rows = std::max(4, (int)(listH / 15)); bool inList = inR(X0, top, LWd, listH);
     if (!S) return;
+    if (hexMode == 6) { drawTraceRender(X0, Y0, Wd); return; }
+    if (hexMode == 5) { drawTraceFull(X0, Y0, Wd, top, rows, wheel); return; }
     if (hexMode == 4) {   // every process, ordered by the traffic on its lanes in the time window
         struct LR { const Proc* p; double rd, wr, nin, nout; int socks; }; vector<LR> rs; const Snapshot* past = pastSnap(); bool cap = capOn();
         std::unordered_map<int, std::array<double, 2>> net; if (cap) { double t0 = nowSec() - winSec; for (auto it = flowHist.rbegin(); it != flowHist.rend() && it->t >= t0; ++it) net[it->pid][it->out ? 1 : 0] += (double)it->bytes; }
@@ -1314,9 +1546,9 @@ static void drawUi() {
     // top bar
     panelBg(12, 12, LW - 24, 36); float x = 24, y = 19;
     text(x, y + 1, L"MATRIX//SYS", uiCol(T_CYAN), tfBig.Get()); x += 112;
-    const char* tabs[] = { "PROCESSES", "NETWORK", "FILES", "DISKS", "DEVICES", "MEMORY" }; const int tv[] = { 0, 1, 3, 4, 5, 2 };
-    for (int i = 0; i < 6; i++) if (button(x, y, tabs[i], view == tv[i]) && view != tv[i]) setView(tv[i]);
-    x += 10; { float w = 120; strokeR(x, y, w, 22, D2D1::ColorF(0x4fe3ff, query.empty() ? .28f : .8f)); if (query.empty()) text(x + 8, y + 3, "type to filter", T_DIM); else text(x + 8, y + 3, query + "_", T_WHITE); x += w + 10; }
+    const char* tabs[] = { "PROCESSES", "NETWORK", "FILES", "DISKS", "DEVICES", "MEMORY", "TRACE" }; const int tv[] = { 0, 1, 3, 4, 5, 2, 6 };
+    for (int i = 0; i < 7; i++) if (button(x, y, tabs[i], view == tv[i]) && view != tv[i]) setView(tv[i]);
+    x += 10; if (view != 6) { float w = 120; strokeR(x, y, w, 22, D2D1::ColorF(0x4fe3ff, query.empty() ? .28f : .8f)); if (query.empty()) text(x + 8, y + 3, "type to filter", T_DIM); else text(x + 8, y + 3, query + "_", T_WHITE); x += w + 10; }
     if (button(x, y, paused ? "RESUME" : "PAUSE", paused)) paused = !paused;
     x += 10;
     if (!elevated && !capOn()) { if (button(x, y, "REAL TRAFFIC (ADMIN)", false, T_WARN)) requestAdmin(); }
@@ -1332,13 +1564,14 @@ static void drawUi() {
         else if (view == 4) lg = { { "DISKS \xE2\x80\x94 floor area and height = size on each partition, by folder.", T_TEXT }, { "Select a folder to open it in place; the panel can zoom the whole floor into it.", T_DIM } };
         else if (view == 5) lg = { { "DEVICES \xE2\x80\x94 hardware by connection, rising from this PC; network neighbours hang off their adapter.", T_TEXT }, { "Dots follow the connection path for disks and network adapters (driver counters).", T_DIM } };
         else if (view == 3) lg = { { "FILES \xE2\x80\x94 ring: processes holding files open; outer boxes: files shared by several processes.", T_TEXT }, { "Select a process to fan out its open files. Without admin rights only your own processes are readable.", T_DIM } };
+        else if (view == 6) lg = { { "TRACE \xE2\x80\x94 your requests leave as magenta orbs; each answer comes back in the colour of its kind.", T_TEXT }, { "Answers: violet DNS \xC2\xB7 amber router reply \xC2\xB7 cyan echo \xC2\xB7 blue TCP \xC2\xB7 green TLS and HTTP success", T_DIM }, { "yellow redirect \xC2\xB7 red error or silence \xC2\xB7 white greeting. Enter traces at full speed, Shift+Enter step by step. Space pauses, \xE2\x86\x90 \xE2\x86\x92 step.", T_DIM } };
         else lg = { { "MEMORY \xE2\x80\x94 floor area and height = working set per application.", T_TEXT }, { "Select a tower to split it into its processes. Shared pages count in each process.", T_DIM } };
         if (view < 2 || view == 3) lg.push_back({ capOn() ? "Network dots are captured traffic (200 ms bundles per flow); disk, pipe and loopback dots are estimates." : "Dots are estimated from process I/O counters. Use the admin button for real traffic.", T_DIM });
         lg.push_back({ "Left-drag orbit \xC2\xB7 right/middle-drag or arrow keys pan \xC2\xB7 wheel zoom \xC2\xB7 click select \xC2\xB7 Esc clear \xC2\xB7 Home reset \xC2\xB7 [ ] time window", T_DIM });
         if (!statsLine.empty()) lg.insert(lg.begin(), { statsLine, T_CYAN });
         size_t mx = 0; for (auto& l : lg) mx = std::max(mx, widen(l.s).size()); float w = mx * CW + 24, h = lg.size() * 16.f + 14;
         legendTop = LH - h - 12; panelBg(12, LH - h - 12, w, h); for (size_t i = 0; i < lg.size(); i++) text(24, LH - h - 12 + 7 + i * 16, lg[i].s, lg[i].c); }
-    if (hexMode) drawHex(); else drawPanel();
+    if (hexMode) drawHex(); else if (view == 6) { drawTraceBar(); drawTracePanel(); } else drawPanel();
     // tooltip
     if (!mouseOverUi) {
         if (hovPart >= 0 && hovPart < (int)parts.size()) { Part& p = parts[hovPart]; bool o = p.dir > 0; vector<TL> t;
@@ -1348,6 +1581,7 @@ static void drawUi() {
             else { auto li = LY[view].lanes.find(p.lane); if (li != LY[view].lanes.end()) { Lane& l = li->second;
                 t = { { "\xE2\x89\x88 " + fmtB(p.bytes) + " bundle" + (o ? "  \xE2\x96\xB2 outbound" : "  \xE2\x96\xBC inbound"), o ? T_OUT : T_IN }, { l.proto, T_TEXT }, { (o ? l.from : l.to) + " \xE2\x86\x92 " + (o ? l.to : l.from), T_TEXT }, { "lane rate " + fmtR(o ? l.out : l.inn) + " (estimated)", T_DIM } }; } }
             drawTip(t); }
+        else if (view == 6 && trHovOrb >= 0 && trHovOrb < (int)TR.msgs.size()) drawTip(trOrbTip(TR.msgs[trHovOrb]));
         else if (!hov.empty()) { auto n = LY[view].nodes.find(hov); if (n != LY[view].nodes.end()) drawTip(nodeTip(n->second)); }
     }
     { string tm; int tc; double tt; { std::lock_guard<std::mutex> l(toastMx); tm = toastMsg; tc = toastCol; tt = toastT; }
@@ -1366,6 +1600,51 @@ static void drawUi() {
         else if (button(bx, by, cf.yes, false, T_RED)) { cf.open = false; performAction(cf.key); }
         bx += 12; if (button(bx, by, "CANCEL", false)) cf.open = false;
     }
+}
+
+// ================================================================ trace view: orbs
+static bool trNodePos(int i, V3& p) { auto it = LY[6].nodes.find("tr:" + std::to_string(i)); if (it == LY[6].nodes.end()) return false; p = it->second.pos; return true; }
+static vector<V3> trPath(const TrMsg& m) {   // along the chain of hops when both ends are on it, otherwise an arc
+    vector<V3> p; V3 a, b; if (!trNodePos(m.from, a) || !trNodePos(m.to, b)) return p; if (m.from == m.to) { p.push_back(a); return p; }
+    int ia = -1, ib = -1; for (size_t i = 0; i < TR.chain.size(); i++) { if (TR.chain[i] == m.from) ia = (int)i; if (TR.chain[i] == m.to) ib = (int)i; }
+    if (ia >= 0 && ib >= 0) { int st = ia < ib ? 1 : -1; for (int i = ia; i != ib + st; i += st) { V3 q; if (trNodePos(TR.chain[i], q)) p.push_back(q); } return p; }
+    V3 c = (a + b) * .5f; c.y += .22f * len(a - b); for (int s = 0; s <= 14; s++) p.push_back(bez(a, c, b, s / 14.f)); return p;
+}
+static V3 polyAt(const vector<V3>& p, float f) {
+    if (p.empty()) return {}; if (p.size() == 1) return p[0]; float tot = 0; for (size_t i = 1; i < p.size(); i++) tot += len(p[i] - p[i - 1]); float want = std::max(0.f, std::min(1.f, f)) * tot;
+    for (size_t i = 1; i < p.size(); i++) { float l = len(p[i] - p[i - 1]); if (want <= l || i + 1 == p.size()) return lerp(p[i - 1], p[i], l > 0 ? std::min(1.f, want / l) : 0); want -= l; }
+    return p.back();
+}
+static void trQuad(V3 p, float hs, Col c, float f, V3 r, V3 u) {
+    V3 q[4] = { p - r * hs - u * hs, p + r * hs - u * hs, p + r * hs + u * hs, p - r * hs + u * hs }; const float uv[4][2] = { {-1,-1},{1,-1},{1,1},{-1,1} }; const int ix[6] = { 0, 1, 2, 0, 2, 3 };
+    for (int j : ix) VQ.push_back({ q[j].x, q[j].y, q[j].z, c.r * f, c.g * f, c.b * f, uv[j][0], uv[j][1] });
+}
+static void trOrbs(float dt) {
+    static bool slowNow = false; trHovOrb = -1; size_t n = TR.msgs.size();
+    // live run: once everything received so far has been shown, the trace may take its next real step
+    if (TR.live && TR.running && !trPaused && !paused && g_trWaiting && g_trPermits == 0 && (!n || trPlay >= trEnd + .1f)) g_trPermits = 1;
+    if (!n || trSt.size() != n) return; V3 f = norm(camT - camEye), r = norm(cross(f, { 0, 1, 0 })), u = cross(r, f);
+    trPlay += dt * (paused || trPaused ? 0 : slowNow ? .1f : 1); if (TR.running) trPlay = std::min(trPlay, trEnd + .5f); else if (trPlay > trEnd + 1.8f) trPlay = 0;
+    float best = 20; auto hoverTest = [&](V3 q, int i) { float sx, sy; if (project(q, sx, sy)) { float d = hypotf(sx - mouseX, sy - mouseY); if (d < best) { best = d; trHovOrb = i; } } };
+    for (size_t i = 0; i < n; i++) { const TrMsg& m = TR.msgs[i]; float d = trDur[i], lt = trPlay - trSt[i]; bool selM = (int)i == trSel, active = !trPaused && lt >= 0 && lt < d + .45f; if (!active && !selM) continue;
+        vector<V3> p = trPath(m); if (p.empty()) continue; Col c = trCol(m);
+        if (selM && trPaused) {   // paused: this one message travels once, then rests where it arrived
+            for (size_t k = 1; k < p.size(); k++) pushLine(p[k - 1], p[k], c, 1.5f); float k = std::min(1.f, (float)(nowSec() - trStepT) / d), pulse = 1 + .22f * sinf((float)nowSec() * 5);
+            if (p.size() == 1) { float hs = std::max(1.2f, len(p[0] - camEye) * .012f) * (k < 1 ? .6f + k * 1.6f : 2.2f * pulse); trQuad(p[0], hs, c, k < 1 ? 1.2f : .8f, r, u); hoverTest(p[0], (int)i); continue; }
+            V3 q = polyAt(p, k); float base = std::max(1.1f, len(q - camEye) * .011f) * (k < 1 ? 1 : pulse);
+            if (k < 1) for (int t = 8; t >= 1; t--) { float kk = k - t * .022f; if (kk < 0) continue; trQuad(polyAt(p, kk), base * (1 - t * .09f), c, .55f * (1 - t / 9.f), r, u); }
+            trQuad(q, base * 1.7f, c, 1.2f, r, u); trQuad(q, base * .6f, C_WHITE, .9f, r, u); hoverTest(q, (int)i); continue; }
+        if (selM) {   // the selected message: its path glows and a marker keeps running along it
+            for (size_t k = 1; k < p.size(); k++) pushLine(p[k - 1], p[k], c, 1.5f); float lf = fmodf((float)nowSec() * .7f, 1.f); V3 q = polyAt(p, lf); float hs = std::max(.9f, len(q - camEye) * .009f);
+            if (p.size() > 1) { trQuad(q, hs * 1.3f, c, .9f, r, u); trQuad(q, hs * .6f, C_WHITE, .9f, r, u); } else trQuad(q, hs * (1 + lf * 3), c, 1 - lf, r, u); }
+        if (!active) continue;
+        if (p.size() == 1) { float k = std::min(1.f, lt / d); float hs = std::max(1.2f, len(p[0] - camEye) * .012f) * (.6f + k * 2.4f); trQuad(p[0], hs, c, (1 - k) * 1.3f, r, u); if (k < .8f) hoverTest(p[0], (int)i); continue; }
+        if (lt < d) { float k = lt / d; V3 q = polyAt(p, k); float base = std::max(1.1f, len(q - camEye) * .011f);
+            for (int t = 8; t >= 1; t--) { float kk = k - t * .022f; if (kk < 0) continue; trQuad(polyAt(p, kk), base * (1 - t * .09f), c, .55f * (1 - t / 9.f), r, u); }
+            trQuad(q, base * 1.6f, c, 1.2f, r, u); trQuad(q, base * .6f, C_WHITE, .9f, r, u); hoverTest(q, (int)i); }
+        else { float k = (lt - d) / .45f; V3 q = p.back(); float base = std::max(1.1f, len(q - camEye) * .011f); trQuad(q, base * (1.2f + k * 3), c, (1 - k) * .9f, r, u); }
+    }
+    if (mouseOverUi) trHovOrb = -1; slowNow = trHovOrb >= 0;
 }
 
 // ================================================================ frame
@@ -1399,6 +1678,7 @@ static void frame(float dt) {
     { std::shared_ptr<DevSnap> d; { std::lock_guard<std::mutex> l(g_dvMx); d = g_devSnap; } if (d && d != DV && !paused) { DV = d; devHist.push_back(d); while (devHist.size() > 70) devHist.pop_front(); if (view == 5 && S) rebuild(); } }
     if (!paused) { std::shared_ptr<Snapshot> s; { std::lock_guard<std::mutex> l(g_snapMx); s = g_snap; } if (s && s != S) { S = s; hist.push_back(s); while (hist.size() > 70) hist.pop_front(); rebuild(); if (pendingSel >= 0) { selectKey("p:" + std::to_string(pendingSel)); pendingSel = -1; } }
         std::shared_ptr<vector<FileH>> fh; { std::lock_guard<std::mutex> l(g_fhMx); fh = g_fileHandles; } if (fh != FH) { bool first = !FH || FH->empty(); FH = fh; indexFiles(); if (view == 3 && S) { if (first) LY[3].framed = false; rebuild(); } } }
+    trSync();
     Layer& L = LY[view];
     { vector<Flow> in; vector<DiskIo> din; { std::lock_guard<std::mutex> l(g_flowMx); in.swap(g_flows); din.swap(g_disk); }
         if (!paused && S) { double now = nowSec();
@@ -1459,6 +1739,7 @@ static void frame(float dt) {
             V3 q[4] = { p.p - r * hs - u * hs, p.p + r * hs - u * hs, p.p + r * hs + u * hs, p.p - r * hs + u * hs }; const float uv[4][2] = { {-1,-1},{1,-1},{1,1},{-1,1} }; const int ix[6] = { 0, 1, 2, 0, 2, 3 };
             for (int j : ix) VQ.push_back({ q[j].x, q[j].y, q[j].z, c.r * fade, c.g * fade, c.b * fade, uv[j][0], uv[j][1] });
             i++; } }
+    if (view == 6) trOrbs(dt);
     // draw 3D
     if (VL.size() + VT.size() + VQ.size() > VB_CAP) { VQ.resize(std::min(VQ.size(), (size_t)60000)); if (VL.size() + VT.size() + VQ.size() > VB_CAP) VT.clear(); }
     D3D11_MAPPED_SUBRESOURCE m;
@@ -1474,7 +1755,7 @@ static void frame(float dt) {
     ctx->ResolveSubresource(backTex.Get(), 0, msTex.Get(), 0, DXGI_FORMAT_B8G8R8A8_UNORM); ctx->OMSetRenderTargets(0, nullptr, nullptr);
     // UI
     dc->BeginDraw(); dc->SetTransform(D2D1::Matrix3x2F::Scale(uiScale, uiScale)); drawUi(); dc->EndDraw();
-    if (clickNow && !mouseOverUi) { panelScroll = 0; selectKey(hov); }
+    if (clickNow && !mouseOverUi) { panelScroll = 0; if (view == 6 && trHovOrb >= 0) trPick(trHovOrb); else selectKey(hov); }
     clickNow = false; wheelUi = 0; navKey = 0;
     sc->Present(1, 0);
 }
@@ -1514,26 +1795,34 @@ static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_RBUTTONDOWN: case WM_MBUTTONDOWN: if (!mouseOverUi) { rDown = true; SetCapture(h); } return 0;
     case WM_RBUTTONUP: case WM_MBUTTONUP: rDown = false; if (!lDown) ReleaseCapture(); return 0;
     case WM_MOUSEWHEEL: { float d = GET_WHEEL_DELTA_WPARAM(wp) / 120.f; if (mouseOverUi) wheelUi += d; else { camDist = std::max(6.f, std::min(1500.f, camDist * powf(.88f, d))); flyDist = camDist; flying = false; } return 0; }
-    case WM_CHAR: if (wp == '[' || wp == ']') { const int ws[] = { 1, 5, 10, 30, 60 }; int i = 0; while (i < 4 && ws[i] != winSec) i++; winSec = ws[std::max(0, std::min(4, i + (wp == ']' ? 1 : -1)))]; }
+    case WM_CHAR: if (view == 6 && !hexMode && !cf.open) {   // in the trace view the keyboard writes the target
+            if (wp == 13) trGo((GetKeyState(VK_SHIFT) & 0x8000) != 0);   // Enter: full speed; Shift+Enter: step by step
+            else if (wp == 32) trTogglePause(); else if (wp == 27) { trSel = -1; if (!(TR.live && TR.running)) trPaused = false; selectKey("", false); } else if (wp == 8) { if (!trInput.empty()) trInput.pop_back(); trInputChanged(); }
+            else if (wp == 22) { if (OpenClipboard(h)) { if (HANDLE d = GetClipboardData(CF_UNICODETEXT)) { if (const wchar_t* w = (const wchar_t*)GlobalLock(d)) { for (unsigned char c : narrow(w)) if (c >= 32 && c < 127 && trInput.size() < 240) trInput += (char)c; GlobalUnlock(d); } } CloseClipboard(); trInputChanged(); } }
+            else if (wp >= 32 && wp < 127 && trInput.size() < 240) { trInput += (char)wp; trInputChanged(); }
+            return 0; }
+        if (wp == '[' || wp == ']') { const int ws[] = { 1, 5, 10, 30, 60 }; int i = 0; while (i < 4 && ws[i] != winSec) i++; winSec = ws[std::max(0, std::min(4, i + (wp == ']' ? 1 : -1)))]; }
         else if (wp == 27 && cf.open) cf.open = false;
         else if (wp == 27 && hexMode) hexClose();
         else if (wp == 27) { query.clear(); panelScroll = 0; selectKey("", false); } else if (wp == 8) { if (!query.empty()) query.pop_back(); computeFocus(); } else if (wp >= 32 && wp < 127 && query.size() < 24 && !hexMode) { query += (char)tolower((int)wp); computeFocus(); } return 0;
     case WM_KEYDOWN: {
         // while a list window is open the navigation keys belong to it, not to the 3D view behind it
         if (hexMode && !cf.open && (wp == VK_UP || wp == VK_DOWN || wp == VK_LEFT || wp == VK_RIGHT || wp == VK_PRIOR || wp == VK_NEXT || wp == VK_HOME || wp == VK_END || wp == VK_RETURN)) { navKey = (int)wp; return 0; }
+        if (view == 6 && !hexMode && !cf.open && (wp == VK_LEFT || wp == VK_RIGHT)) { trStepKey(wp == VK_LEFT ? -1 : 1); return 0; }   // left / right step through the replay, one message at a time
+        if (view == 6 && !hexMode && !cf.open && (wp == VK_UP || wp == VK_DOWN)) { navKey = (int)wp; return 0; }   // up / down walk through the steps of the trace
         float s = 28; if (wp == VK_LEFT) panBy(s, 0); else if (wp == VK_RIGHT) panBy(-s, 0);
         else if (wp == VK_UP || wp == VK_DOWN) { V3 f = camT - eyePos(); f.y = 0; f = norm(f); camT = camT + f * ((wp == VK_UP ? 1 : -1) * camDist * .045f); flying = false; }
         else if ((wp == VK_PRIOR || wp == VK_NEXT) && hexMode == 1) { int64_t a = (int64_t)hexAddr + (wp == VK_NEXT ? 1 : -1) * (int64_t)hexRows * 16; hexAddr = a < 0 ? 0 : (uint64_t)a; hexLastRead = 0; }
         else if (wp == VK_PRIOR) panBy(0, s); else if (wp == VK_NEXT) panBy(0, -s);
         else if (wp == VK_HOME) { LY[view].framed = false; camYaw = 0; camPitch = .55f; sel.clear(); rebuild(); }
         return 0; }
-    case WM_DESTROY: Shell_NotifyIconW(NIM_DELETE, &nid); PostQuitMessage(0); return 0;
+    case WM_DESTROY: webShutdown(); Shell_NotifyIconW(NIM_DELETE, &nid); PostQuitMessage(0); return 0;
     }
     return DefWindowProcW(h, msg, wp, lp);
 }
 int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    WSADATA wsa; WSAStartup(MAKEWORD(2, 2), &wsa); nowSec();
+    WSADATA wsa; WSAStartup(MAKEWORD(2, 2), &wsa); nowSec(); CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);   // the optional page renderer is a COM component
     int argc = 0; LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc); wstring arg = argc > 1 ? argv[1] : L"";
     if (arg == L"--service") return runService();                      // started by the Service Control Manager
     if (arg == L"--service-console") { serviceRun(); return 0; }       // same loop without the SCM, for testing
@@ -1549,6 +1838,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     std::thread(collectorThread).detach();
     if (arg == L"--memory" && argc > 2) hexOpenMem(_wtoi(argv[2]));
     if (arg == L"--select" && argc > 2) pendingSel = _wtoi(argv[2]);
+    if (arg == L"--trace" && argc > 2) { view = 6; trInput = narrow(argv[2]); if (argc > 3) { wstring p = argv[3]; trProto = p == L"icmp" ? TP_ICMP : p == L"tcp" ? TP_TCP : p == L"http" ? TP_HTTP : p == L"dns" ? TP_DNS : TP_HTTPS; } trInputChanged(); trGo(wstring(argv[argc - 1]) == L"step"); }   // open in the trace view and start: --trace <target> [icmp|tcp|http|https|dns]
     if (arg == L"--size" && argc > 2) procSizeMode = std::max(0, std::min(2, _wtoi(argv[2])));   // start with processes sized by 0 memory, 1 lane traffic, 2 CPU load
     if (arg == L"--demo-packets") { demoPkts = true; hexOpenPkts(-1, ""); }   // try the packet viewer with synthetic data, no administrator rights needed   // open with a process selected   // open straight into a process's memory
     if (elevated) { g_allowPayload = true; std::thread(captureThread).detach(); std::thread(flushThread).detach(); } else std::thread(svcClientThread).detach();

@@ -190,7 +190,8 @@ inline int doUninstall() {
     RegDeleteTreeW(HKEY_LOCAL_MACHINE, UNINST_KEY); RegDeleteKeyValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", L"MatrixSys");
     std::wstring dir = exePath(); dir = dir.substr(0, dir.find_last_of(L'\\'));
     if (*loc && !_wcsicmp(loc, dir.c_str())) {
-        std::wstring cmd = L"cmd.exe /c ping -n 3 127.0.0.1 >nul & rmdir /s /q \"" + dir + L"\""; STARTUPINFOW si{ sizeof(si) }; PROCESS_INFORMATION pi{};
+        std::wstring data = knownFolder(FOLDERID_LocalAppData), cmd = L"cmd.exe /c ping -n 3 127.0.0.1 >nul & rmdir /s /q \"" + dir + L"\"";
+        if (!data.empty()) cmd += L" & rmdir /s /q \"" + data + L"\\MatrixSys\""; /* the page renderer's profile (cookies, cache) */ STARTUPINFOW si{ sizeof(si) }; PROCESS_INFORMATION pi{};
         wchar_t sys[MAX_PATH]; GetSystemDirectoryW(sys, MAX_PATH);
         if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, sys, &si, &pi)) { CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }
     }

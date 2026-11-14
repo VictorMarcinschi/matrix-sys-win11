@@ -14,7 +14,9 @@ if exist out\MatrixSys.exe ren out\MatrixSys.exe MatrixSys.old%RANDOM%.exe
 echo 1 ICON "matrixsys.ico"> app.rc
 rc /nologo /fo app.res app.rc || exit /b 1
 cl /nologo /std:c++17 /O2 /EHsc /MT /W3 /utf-8 /DUNICODE /D_UNICODE main.cpp app.res /Fo:out\ /Fe:out\MatrixSys.exe /link /SUBSYSTEM:WINDOWS || exit /b 1
-(echo 1 ICON "matrixsys.ico"& echo 2 RCDATA "out\\MatrixSys.exe")> setup.rc
+rem the optional page renderer: its loader sits next to the exe, and is a separate, optional payload of the installer
+copy /y webview2\WebView2Loader.dll out\ >nul || exit /b 1
+(echo 1 ICON "matrixsys.ico"& echo 2 RCDATA "out\\MatrixSys.exe"& echo 3 RCDATA "webview2\\WebView2Loader.dll")> setup.rc
 rc /nologo /fo setup.res setup.rc || exit /b 1
 cl /nologo /std:c++17 /O2 /EHsc /MT /W3 /utf-8 /DUNICODE /D_UNICODE setup.cpp setup.res /Fo:out\ /Fe:out\MatrixSys-Setup.exe /link /SUBSYSTEM:WINDOWS /MANIFEST:EMBED "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'" || exit /b 1
 echo build ok
