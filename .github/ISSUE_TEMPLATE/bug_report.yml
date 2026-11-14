@@ -1,0 +1,47 @@
+name: Bug report
+description: Something does not work, shows wrong data or crashes.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for reporting. Screenshots help a lot; please check them for anything private (computer name, folders, addresses) before attaching.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: dropdown
+    id: tab
+    attributes:
+      label: Tab
+      multiple: true
+      options: [Processes, Network, Files, Disks, Devices, Memory, Trace, Packet or memory viewer, Installer or service, Other]
+    validations:
+      required: true
+  - type: dropdown
+    id: rights
+    attributes:
+      label: How was the app running?
+      options: [Normal user, As administrator, With the background service, Not sure]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: MatrixSys version
+      placeholder: v0.4.0, or the commit you built
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 24H2, x64
+    validations:
+      required: true
+  - type: textarea
+    id: more
+    attributes:
+      label: Screenshots or anything else

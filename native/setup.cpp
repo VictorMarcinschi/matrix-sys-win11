@@ -58,7 +58,7 @@ static std::wstring install(bool start, bool desk, bool svc, bool web) {
     if (desk) shortcut(knownFolder(FOLDERID_PublicDesktop) + L"\\MatrixSys.lnk", exe, dir);
     HKEY k; if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, UNINST_KEY, 0, nullptr, 0, KEY_WRITE, nullptr, &k, nullptr) == ERROR_SUCCESS) {
         auto set = [&](const wchar_t* n, const std::wstring& v) { RegSetValueExW(k, n, 0, REG_SZ, (const BYTE*)v.c_str(), (DWORD)(v.size() + 1) * 2); };
-        set(L"DisplayName", L"MatrixSys"); set(L"DisplayVersion", L"0.3"); set(L"Publisher", L"MatrixSys"); set(L"DisplayIcon", exe); set(L"InstallLocation", dir);
+        set(L"DisplayName", L"MatrixSys"); set(L"DisplayVersion", L"0.4.0"); set(L"Publisher", L"MatrixSys"); set(L"DisplayIcon", exe); set(L"InstallLocation", dir);
         set(L"UninstallString", L"\"" + exe + L"\" --uninstall");
         DWORD one = 1, kb = size / 1024; RegSetValueExW(k, L"NoModify", 0, REG_DWORD, (BYTE*)&one, 4); RegSetValueExW(k, L"NoRepair", 0, REG_DWORD, (BYTE*)&one, 4); RegSetValueExW(k, L"EstimatedSize", 0, REG_DWORD, (BYTE*)&kb, 4);
         RegCloseKey(k);

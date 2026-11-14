@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Questions, ideas and show-and-tell
+    url: https://github.com/VictorMarcinschi/matrix-sys-win11/discussions
+    about: Ask how something works, share a screenshot of your machine, or float an idea before it becomes an issue.
+  - name: Security problem
+    url: https://github.com/VictorMarcinschi/matrix-sys-win11/security/advisories/new
+    about: Please report vulnerabilities privately, not as a public issue.

@@ -1,0 +1,50 @@
+# Builds MatrixSys on every push and pull request. A tag such as v0.4.0 also publishes a GitHub Release
+# with the installer, a portable zip and their SHA-256 checksums, all built here from the tagged source.
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build app and installer
+        shell: cmd
+        run: native\build.bat
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $v = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { "dev-$($env:GITHUB_SHA.Substring(0, 7))" }
+          New-Item -ItemType Directory dist, portable | Out-Null
+          Copy-Item native\out\MatrixSys-Setup.exe "dist\MatrixSys-Setup-$v.exe"
+          Copy-Item native\out\MatrixSys.exe, native\out\WebView2Loader.dll, LICENSE, README.md portable\
+          Copy-Item native\webview2\LICENSE.txt portable\WebView2-LICENSE.txt
+          Compress-Archive portable\* "dist\MatrixSys-$v-portable.zip"
+          Get-ChildItem dist | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" } | Set-Content dist\SHA256SUMS.txt
+          Get-Content dist\SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MatrixSys-${{ github.sha }}
+          path: dist
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = "docs\releases\$env:GITHUB_REF_NAME.md"
+          if (Test-Path $notes) { gh release create $env:GITHUB_REF_NAME (Get-ChildItem dist).FullName --title "MatrixSys $env:GITHUB_REF_NAME" --notes-file $notes }
+          else { gh release create $env:GITHUB_REF_NAME (Get-ChildItem dist).FullName --title "MatrixSys $env:GITHUB_REF_NAME" --generate-notes }

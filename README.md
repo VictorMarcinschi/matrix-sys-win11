@@ -1,8 +1,23 @@
 # MatrixSys
 
-A native, fully offline 3D visualizer of a Windows 11 machine: processes, the data they exchange, network traffic, memory, open files, disks and devices, with controls to act on what it shows. Dark scene, glowing blue-cyan wireframes.
+[![Build](https://github.com/VictorMarcinschi/matrix-sys-win11/actions/workflows/build.yml/badge.svg)](https://github.com/VictorMarcinschi/matrix-sys-win11/actions/workflows/build.yml)
+[![Latest release](https://img.shields.io/github/v/release/VictorMarcinschi/matrix-sys-win11?label=download)](https://github.com/VictorMarcinschi/matrix-sys-win11/releases/latest)
+[![License: MIT](https://img.shields.io/github/license/VictorMarcinschi/matrix-sys-win11)](LICENSE)
 
-![MatrixSys, Processes tab](docs/screenshots/processes.png)
+A native, fully offline 3D visualizer of a Windows 11 machine: processes, the data they exchange, network traffic, memory, open files, disks and devices, with controls to act on what it shows. Type a host name and watch every router and every message between you and it. Dark scene, glowing blue-cyan wireframes.
+
+![MatrixSys, Processes tab with live traffic](docs/screenshots/processes.gif)
+
+## Download
+
+Get the latest version from the **[Releases page](https://github.com/VictorMarcinschi/matrix-sys-win11/releases/latest)**:
+
+- **MatrixSys-Setup-….exe** installs it, with optional shortcuts, background capture service and web page renderer.
+- **MatrixSys-…-portable.zip** runs without installing: unzip and start `MatrixSys.exe`.
+
+Windows 11, 64-bit. Both files are built by GitHub Actions from the public source and are not code-signed yet, so Windows SmartScreen will say the publisher is unknown; choose *More info* and *Run anyway* if you trust the build. `SHA256SUMS.txt` on the release lists their checksums.
+
+Questions, ideas, screenshots of your own machine: [Discussions](https://github.com/VictorMarcinschi/matrix-sys-win11/discussions). Bugs and feature requests: [Issues](https://github.com/VictorMarcinschi/matrix-sys-win11/issues). Want to help? See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Views
 
@@ -46,7 +61,7 @@ Treemap of physical memory by program.
 
 Type a host, an IP address or a URL and pick a protocol (ICMP, TCP, HTTP, HTTPS, DNS; a prefix such as `https://` selects it). Shows the name lookup, every router on the way and the whole conversation as orbs travelling between the nodes, with each request and response decoded (DNS records, TLS handshake and certificate, HTTP headers and body) and viewable as bytes. Enter runs the trace at full speed and replays it; Shift+Enter runs it step by step (Right arrow performs the next real step, Space runs it live or pauses, Left arrow goes back).
 
-![Trace tab](docs/screenshots/trace.png)
+![Trace tab replaying a trace to example.com](docs/screenshots/trace.gif)
 
 An HTML response can be shown as a rendered page, with switches for JavaScript, cookies, resources and an XSS guard (see [Rendered pages](#rendered-pages-optional)).
 
@@ -56,7 +71,7 @@ Also: lists of processes by lane traffic and of open ports, a packet viewer with
 
 ## Build
 
-Requires Visual Studio with the C++ tools and Python 3 (only to generate the icon). The only third-party files are Microsoft's WebView2 header and loader in `native/webview2/`, used by the optional page renderer.
+Requires Visual Studio 2022 or later with the C++ tools, and Python 3 only if you change the icon. The only third-party files are Microsoft's WebView2 header and loader in `native/webview2/`, used by the optional page renderer.
 
 ```bat
 native\build.bat
@@ -66,6 +81,8 @@ Output goes to `native\out\`:
 
 - `MatrixSys.exe` – the app.
 - `MatrixSys-Setup.exe` – the installer (shortcuts, optional background service started at boot, uninstaller).
+
+Every push is built by GitHub Actions; pushing a tag such as `v0.4.1` also publishes a release. See [CONTRIBUTING.md](CONTRIBUTING.md) for how the code is laid out.
 
 ## Rendered pages (optional)
 
@@ -95,6 +112,10 @@ Command-line switches: `--tray`, `--select <pid>`, `--memory <pid>`, `--size <0|
 | `native/make_icon.py` | icon generator |
 | `index.html`, `server.py`, `collector.ps1`, `capture.py` | the first, web-based prototype (superseded by the native app) |
 | `MatrixSys-macOS-prompt.md` | specification for a macOS port |
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for what the app and its optional service do, what it sends over the network, and how to report a vulnerability privately.
 
 ## License
 
