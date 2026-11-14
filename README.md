@@ -32,7 +32,7 @@ Output goes to `native\out\`:
 
 The app runs unprivileged and shows estimated traffic. **REQUEST ADMIN** relaunches it elevated to capture real packets. The optional service does the accounting at boot so the unprivileged app gets real numbers; the service never captures packet contents.
 
-Command-line switches: `--tray`, `--select <pid>`, `--memory <pid>`, `--demo-packets`, `--install-service`, `--uninstall-service`, `--service-console`, `--uninstall`.
+Command-line switches: `--tray`, `--select <pid>`, `--memory <pid>`, `--size <0|1|2>` (size processes by memory, lane traffic or CPU load), `--demo-packets`, `--install-service`, `--uninstall-service`, `--service-console`, `--uninstall`.
 
 ## Layout
 

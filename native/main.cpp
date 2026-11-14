@@ -162,7 +162,12 @@ static bool project(V3 p, float& sx, float& sy) {
     XMVECTOR c = XMVector4Transform(XMVectorSet(p.x, p.y, p.z, 1), VP); float w = XMVectorGetW(c); if (w <= .05f) return false;
     sx = (XMVectorGetX(c) / w * .5f + .5f) * LW; sy = (1 - (XMVectorGetY(c) / w * .5f + .5f)) * LH; return true;
 }
-static float procSize(const Proc& p) { return std::min(2.1f, std::max(.5f, .5f + log10f(1 + p.ws / 1048576.f) * .5f)); }
+static int procSizeMode = 0;   // what the size of a process in the Processes view stands for: 0 memory, 1 lane traffic, 2 CPU load
+static float procSize(const Proc& p, int mode = 0) {
+    float v = mode == 1 ? log10f(1 + (float)(p.rd + p.wr) / 1024.f) * .32f   // 1 MB/s is about 1.5, 100 MB/s reaches the cap
+            : mode == 2 ? sqrtf((float)std::max(0., p.cpu)) * .35f           // percent of the whole machine: 6% is about 1.4, 20% reaches the cap
+            : log10f(1 + p.ws / 1048576.f) * .5f;
+    return std::min(2.1f, std::max(.5f, .5f + v)); }
 
 // ================================================================ socket model
 static void buildSM() {
@@ -237,8 +242,8 @@ static void buildProc() {
     for (auto& p : S->procs) {
         auto li = L.lay.find(p.pid); if (li == L.lay.end()) continue; string key = "p:" + std::to_string(p.pid);
         auto pl = p.ppid ? L.lay.find(p.ppid) : L.lay.end(); bool hasPar = p.ppid && pl != L.lay.end() && S->get(p.ppid);
-        Node& n = up(L, key, OCTA, K_PROC, li->second.pos, S3(procSize(p)), nameColor(p.name), hasPar ? &pl->second.pos : nullptr);
-        n.pid = p.pid; n.name = p.name; n.label = noExe(p.name); n.glow = .35f + std::min(1.f, (float)p.cpu / 8); n.lp = procSize(p) + std::min(2.f, (float)p.cpu / 5) + (L.kids.count(p.pid) && !L.kids[p.pid].empty() ? .6f : 0);
+        Node& n = up(L, key, OCTA, K_PROC, li->second.pos, S3(procSize(p, procSizeMode)), nameColor(p.name), hasPar ? &pl->second.pos : nullptr);
+        n.pid = p.pid; n.name = p.name; n.label = noExe(p.name); n.glow = .35f + std::min(1.f, (float)p.cpu / 8); n.lp = procSize(p, procSizeMode) + std::min(2.f, (float)p.cpu / 5) + (L.kids.count(p.pid) && !L.kids[p.pid].empty() ? .6f : 0);
         if (hasPar) { Lane l; l.key = "t:" + std::to_string(p.pid); l.a = "p:" + std::to_string(p.ppid); l.b = key; l.color = C_BLUE; l.w = .5f; l.tree = true; lanes.push_back(l); }
         bool net = SM.remote.count(p.pid) > 0; double rd = p.rd, wr = p.wr;
         if (net) {   // with capture on, network dots are real traffic and the measured share is taken off the local I/O estimate
@@ -541,7 +546,7 @@ static bool navList(int& cur, float& scroll, int n, int page) {   // moves cur, 
     cur = std::max(0, std::min(n - 1, cur)); if (moved) { if (cur < (int)scroll) scroll = (float)cur; if (cur >= (int)scroll + page) scroll = (float)(cur - page + 1); }
     return k == VK_RETURN;
 }
-static int laneSort = 0;   // process list order: 0 all lanes, 1 network, 2 disk reads, 3 disk writes
+static int laneSort = 0;   // process list order: 0 all lanes, 1 network, 2 disk reads, 3 disk writes, 4 CPU load
 static int pkFilterPid = -1, pkFilterPort = -1, pkFilterProto = 0; static float portScroll = 0; static string pkFilterIp; static vector<Pkt> pkList; static bool pkFrozen = false, pkHasSel = false; static Pkt pkSel; static float pkScroll = 0, pkHexScroll = 0; static double pkLast = 0;
 static void hexClose() { if (hexProc) CloseHandle(hexProc); hexProc = nullptr; hexMode = 0; g_wantPkts = false; }
 static void hexLoadRegions() {
@@ -605,7 +610,8 @@ static void selectKey(const string& key, bool fly = true) {
     if (key.rfind("hexmem:", 0) == 0) { hexOpenMem(atoi(key.c_str() + 7)); return; }
     if (key.rfind("hexpkt:", 0) == 0) { string r = key.substr(7); if (r.rfind("pid:", 0) == 0) hexOpenPkts(atoi(r.c_str() + 4), ""); else if (r.rfind("ip:", 0) == 0) hexOpenPkts(-1, r.substr(3)); else if (r.rfind("port:", 0) == 0 && r.size() > 9) hexOpenPkts(-1, "", atoi(r.c_str() + 9), r.compare(5, 3, "UDP") == 0 ? 17 : 6); else hexOpenPkts(-1, ""); return; }
     if (key == "hexports") { hexClose(); hexMode = 3; portScroll = 0; listCur = 0; return; }
-    if (key == "hexlanes") { hexClose(); hexMode = 4; portScroll = 0; listCur = 0; return; }
+    if (key.rfind("size:", 0) == 0) { procSizeMode = std::max(0, std::min(2, atoi(key.c_str() + 5))); rebuild(); return; }
+    if (key == "hexlanes") { hexClose(); if (procSizeMode == 2) laneSort = 4; else if (laneSort == 4) laneSort = 0; hexMode = 4; portScroll = 0; listCur = 0; return; }
     if (key == "dkrescan") { g_dkRescan = true; diskRoot.clear(); sel.clear(); return; }
     sel = key; if (view == 0 && S) buildProc(); if (view == 2 && S) buildRam(); if (view == 3 && S) buildFiles(); if (view == 4 && S) buildDisks(); computeFocus();
     auto n = LY[view].nodes.find(key);
@@ -771,7 +777,13 @@ static void winSection(const Proc& p) {
 // With nothing selected, each view lists who was most active in the window.
 static void summaryPanel() {
     const Snapshot* past = pastSnap(); struct R { double a, b; const Proc* p; }; vector<R> rows;
-    if (view == 0) { P(0, "Processes"); P(1, std::to_string(S->procs.size()) + " running. Click a process to spread out the cluster it sits in."); P(5, "LIST ALL BY LANE TRAFFIC", "", 0, "hexlanes"); winButtons("LANE TRAFFIC");
+    if (view == 0) { P(0, "Processes"); P(1, std::to_string(S->procs.size()) + " running. Click a process to spread out the cluster it sits in."); P(2, "SIZE PROCESSES BY"); P(7, "MEMORY|size:0;LANE TRAFFIC|size:1;CPU LOAD|size:2", "size:" + std::to_string(procSizeMode));
+        P(5, "LIST ALL PROCESSES", "", 0, "hexlanes");
+        if (procSizeMode == 2) { P(2, "CPU LOAD \xC2\xB7 NOW"); vector<const Proc*> cs; for (auto& p : S->procs) if (p.cpu >= .05) cs.push_back(&p);
+            std::sort(cs.begin(), cs.end(), [](const Proc* x, const Proc* y) { return x->cpu != y->cpu ? x->cpu > y->cpu : x->pid < y->pid; });
+            for (size_t i = 0; i < cs.size() && i < 16; i++) { char b[40]; snprintf(b, 40, "  %.1f%%", cs[i]->cpu); P(4, cs[i]->name + " " + std::to_string(cs[i]->pid) + b, "", 0, "p:" + std::to_string(cs[i]->pid)); }
+            if (cs.empty()) P(1, "Nothing is using the processor right now."); return; }
+        winButtons("LANE TRAFFIC");
         for (auto& p : S->procs) { IoWin w = ioWin(p.pid, past); if (w.rd + w.wr > 0) rows.push_back({ w.rd, w.wr, &p }); }
         std::sort(rows.begin(), rows.end(), [](const R& x, const R& y) { return x.a + x.b > y.a + y.b; });
         for (size_t i = 0; i < rows.size() && i < 16; i++) P(4, rows[i].p->name + " " + std::to_string(rows[i].p->pid) + "  \xE2\x96\xBC" + fmtB(rows[i].a) + " \xE2\x96\xB2" + fmtB(rows[i].b), "", 0, "p:" + std::to_string(rows[i].p->pid));
@@ -926,7 +938,7 @@ static void drawPanel() {
         case 5: { float bx = x + 12; if (button(bx, y + 2, i.a, false, i.cb ? i.cb : T_CYAN) && mouseY > y0 && mouseY < y0 + h) { act = i.sel; actView = i.view; doAct = true; } } break;
         case 7: { float bx = x + 12; const string& a = i.a; size_t s = 0;   // a row of buttons: "LABEL|key;LABEL|key"
             while (s < a.size()) { size_t e = a.find(';', s); if (e == string::npos) e = a.size(); size_t bar = a.find('|', s);
-                if (bar < e) { if (button(bx, y + 1, a.substr(s, bar - s), false, i.cb ? i.cb : T_CYAN) && mouseY > y0 && mouseY < y0 + h) { act = a.substr(bar + 1, e - bar - 1); actView = -1; doAct = true; } bx += 4; } s = e + 1; } } break;
+                if (bar < e) { if (button(bx, y + 1, a.substr(s, bar - s), !i.b.empty() && a.compare(bar + 1, e - bar - 1, i.b) == 0, i.cb ? i.cb : T_CYAN) && mouseY > y0 && mouseY < y0 + h) { act = a.substr(bar + 1, e - bar - 1); actView = -1; doAct = true; } bx += 4; } s = e + 1; } } break;
         case 6: { float bx = x + 12; const int ws[] = { 1, 5, 10, 30, 60 }; for (int s : ws) { if (button(bx, y + 1, std::to_string(s) + "s", winSec == s) && mouseY > y0 && mouseY < y0 + h) winSec = s; bx += 4; } } break;
         }
         y += ih; }
@@ -1159,19 +1171,19 @@ static void drawHex() {
         std::unordered_map<int, int> socks; for (auto& [k, x] : SM.loop) { socks[x.a] += x.n; socks[x.b] += x.n; }
         for (auto& p : S->procs) { IoWin w = ioWin(p.pid, past); auto n = net.find(p.pid); auto s = socks.find(p.pid); rs.push_back({ &p, w.rd, w.wr, n == net.end() ? 0 : n->second[0], n == net.end() ? 0 : n->second[1], s == socks.end() ? 0 : s->second }); }
         auto key = [&](const LR& a) { double dr = cap ? std::max(0., a.rd - a.nin) : a.rd, dw = cap ? std::max(0., a.wr - a.nout) : a.wr;
-            return laneSort == 1 ? a.nin + a.nout : laneSort == 2 ? dr : laneSort == 3 ? dw : std::max(a.rd + a.wr, a.nin + a.nout); };
+            return laneSort == 4 ? a.p->cpu : laneSort == 1 ? a.nin + a.nout : laneSort == 2 ? dr : laneSort == 3 ? dw : std::max(a.rd + a.wr, a.nin + a.nout); };
         std::sort(rs.begin(), rs.end(), [&](const LR& a, const LR& b) { double x = key(a), y = key(b); return x != y ? x > y : a.p->pid < b.p->pid; });
-        text(X0 + 12, Y0 + 9, widen("PROCESSES BY LANE TRAFFIC \xC2\xB7 " + std::to_string(rs.size()) + " processes \xC2\xB7 last " + std::to_string(winSec) + "s ( [ ] changes it )"), uiCol(T_CYAN), tfBig.Get());
-        { float bx = X0 + 12; text(bx, top + 3, string("SORT BY"), T_DIM); bx += 62; const char* names[] = { "ALL LANES", "NETWORK", "DISK READS", "DISK WRITES" };
-            for (int m = 0; m < 4; m++) { if (button(bx, top, names[m], laneSort == m)) { laneSort = m; portScroll = 0; } bx += 4; } }
-        text(X0 + 12, top + 26, string("PROCESS                           PID   ALL LANES  in / out       NETWORK  in / out       DISK+PIPES in / out    LOCAL SOCKETS"), T_DIM);
+        text(X0 + 12, Y0 + 9, widen(string(laneSort == 4 ? "PROCESSES BY CPU LOAD" : "PROCESSES BY LANE TRAFFIC") + " \xC2\xB7 " + std::to_string(rs.size()) + " processes \xC2\xB7 last " + std::to_string(winSec) + "s ( [ ] changes it )"), uiCol(T_CYAN), tfBig.Get());
+        { float bx = X0 + 12; text(bx, top + 3, string("SORT BY"), T_DIM); bx += 62; const char* names[] = { "ALL LANES", "NETWORK", "DISK READS", "DISK WRITES", "CPU LOAD" };
+            for (int m = 0; m < 5; m++) { if (button(bx, top, names[m], laneSort == m)) { laneSort = m; portScroll = 0; } bx += 4; } }
+        text(X0 + 12, top + 26, string("PROCESS                           PID   CPU%   ALL LANES  in / out       NETWORK  in / out       DISK+PIPES in / out    LOCAL SOCKETS"), T_DIM);
         if (in) portScroll = std::max(0.f, std::min(portScroll - wheel * 3, std::max(0.f, (float)rs.size() - (rows - 3))));
         bool enter = navList(listCur, portScroll, (int)rs.size(), rows - 3);
         int first = (int)portScroll;
         for (int i = 0; i < rows - 3 && first + i < (int)rs.size(); i++) { const LR& r = rs[first + i]; float y = top + 41 + i * 15; bool hot = inR(X0 + 6, y, Wd - 12, 15), cur = first + i == listCur; if (hot || cur) fillR(X0 + 6, y, Wd - 12, 15, D2D1::ColorF(0x4fe3ff, cur ? .22f : .12f));
             string nm = r.p->name; if (nm.size() > 28) nm = nm.substr(0, 27) + "~"; double lr = std::max(0., r.rd - r.nin), lw = std::max(0., r.wr - r.nout);
-            char b[400]; snprintf(b, 400, "%-28s %8d   %9s %9s     %9s %9s     %9s %9s     %s", nm.c_str(), r.p->pid, fmtB(r.rd).c_str(), fmtB(r.wr).c_str(), cap ? fmtB(r.nin).c_str() : "-", cap ? fmtB(r.nout).c_str() : "-", fmtB(cap ? lr : r.rd).c_str(), fmtB(cap ? lw : r.wr).c_str(), r.socks ? std::to_string(r.socks).c_str() : "");
-            text(X0 + 12, y, string(b), hot || cur ? T_WHITE : r.rd + r.wr + r.nin + r.nout > 0 ? T_TEXT : T_DIM);
+            char b[400]; snprintf(b, 400, "%-28s %8d %6.1f   %9s %9s     %9s %9s     %9s %9s     %s", nm.c_str(), r.p->pid, r.p->cpu, fmtB(r.rd).c_str(), fmtB(r.wr).c_str(), cap ? fmtB(r.nin).c_str() : "-", cap ? fmtB(r.nout).c_str() : "-", fmtB(cap ? lr : r.rd).c_str(), fmtB(cap ? lw : r.wr).c_str(), r.socks ? std::to_string(r.socks).c_str() : "");
+            text(X0 + 12, y, string(b), hot || cur ? T_WHITE : r.rd + r.wr + r.nin + r.nout > 0 || (laneSort == 4 && r.p->cpu >= .05) ? T_TEXT : T_DIM);
             if ((hot && clickNow) || (cur && enter)) { string key = "p:" + std::to_string(r.p->pid); hexClose(); if (view != 0) setView(0, key); else selectKey(key); return; } }
         return;
     }
@@ -1315,7 +1327,7 @@ static void drawUi() {
     else text(LW / 2 - 50, LH / 2, L"JACKING IN...", uiCol(T_CYAN), tfBig.Get());
     // legend
     { vector<TL> lg;
-        if (view == 0) lg = { { "PROCESS TREE \xE2\x80\x94 children rise above their parent; size = memory, glow = CPU.", T_TEXT }, { "Violet lanes = local socket links between processes.", T_DIM } };
+        if (view == 0) lg = { { string("PROCESS TREE \xE2\x80\x94 children rise above their parent; size = ") + (procSizeMode == 1 ? "lane traffic" : procSizeMode == 2 ? "CPU load" : "memory") + ", glow = CPU.", T_TEXT }, { "Violet lanes = local socket links between processes.", T_DIM } };
         else if (view == 1) lg = { { "NETWORK \xE2\x80\x94 inner ring: processes with sockets; stacks: open ports; outer ring: remote hosts.", T_TEXT }, { "Ports: green = local only, amber = network-reachable, violet = UDP.", T_DIM } };
         else if (view == 4) lg = { { "DISKS \xE2\x80\x94 floor area and height = size on each partition, by folder.", T_TEXT }, { "Select a folder to open it in place; the panel can zoom the whole floor into it.", T_DIM } };
         else if (view == 5) lg = { { "DEVICES \xE2\x80\x94 hardware by connection, rising from this PC; network neighbours hang off their adapter.", T_TEXT }, { "Dots follow the connection path for disks and network adapters (driver counters).", T_DIM } };
@@ -1537,6 +1549,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     std::thread(collectorThread).detach();
     if (arg == L"--memory" && argc > 2) hexOpenMem(_wtoi(argv[2]));
     if (arg == L"--select" && argc > 2) pendingSel = _wtoi(argv[2]);
+    if (arg == L"--size" && argc > 2) procSizeMode = std::max(0, std::min(2, _wtoi(argv[2])));   // start with processes sized by 0 memory, 1 lane traffic, 2 CPU load
     if (arg == L"--demo-packets") { demoPkts = true; hexOpenPkts(-1, ""); }   // try the packet viewer with synthetic data, no administrator rights needed   // open with a process selected   // open straight into a process's memory
     if (elevated) { g_allowPayload = true; std::thread(captureThread).detach(); std::thread(flushThread).detach(); } else std::thread(svcClientThread).detach();
     std::thread(fileScanThread).detach(); std::thread(diskScanThread).detach(); std::thread(dnsThread).detach(); std::thread(deviceThread).detach();
