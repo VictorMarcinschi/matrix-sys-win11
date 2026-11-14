@@ -208,34 +208,67 @@ static void buildProc() {
         if (p) { auto ki = L.kids.find(sp); if (ki != L.kids.end() && ki->second.size() > 1) ex.insert(sp); if (p->ppid && S->get(p->ppid)) ex.insert(p->ppid); else exRoots = true; } }
     for (int e : ex) sig = (sig ^ (uint64_t(e) * 31 + 17)) * 1099511628211ull; if (exRoots) sig = (sig ^ 0x9e37) * 1099511628211ull;
     if (sig != L.sig) {
-        L.lay.clear(); const float LEAF = 1.9f, LEVEL = 10;
+        std::unordered_map<int, Lay> prev; prev.swap(L.lay); const float LEAF = 1.9f, LEVEL = 10;
         std::function<Lay&(int)> measure = [&](int pid) -> Lay& {
             auto& ks = L.kids[pid]; std::sort(ks.begin(), ks.end()); Lay o; o.r = LEAF; bool wide = ex.count(pid) > 0;
             float mx = 0, sec = 0, mx0 = 0, sec0 = 0, sum0 = 0; int big = -1;
             for (int k : ks) { Lay& ko = measure(k); ko.er = wide ? std::max(ko.r, 5.5f) : ko.r; o.sum += ko.er * 2; if (ko.er > mx) { sec = mx; mx = ko.er; big = k; } else sec = std::max(sec, ko.er);
                 sum0 += ko.r0 * 2; if (ko.r0 > mx0) { sec0 = mx0; mx0 = ko.r0; } else sec0 = std::max(sec0, ko.r0); }
+            // Hysteresis: a sibling that grows a little past the current spine child does not take its place (that would swap two whole subtrees).
+            { auto pv = prev.find(pid); int ob = pv != prev.end() && pv->second.spine ? pv->second.big : -1;
+                if (ob >= 0 && ob != big && L.lay.count(ob) && std::find(ks.begin(), ks.end(), ob) != ks.end() && L.lay[ob].er >= mx * .7f) { big = ob; mx = L.lay[ob].er; sec = 0; for (int k : ks) if (k != big) sec = std::max(sec, L.lay[k].er); } }
             // A child with a big subtree sits straight above its parent with its siblings ringed around it; a plain ring would double the radius per level.
             auto ringR = [&](float sum, float m, float s2, size_t n, bool& spine, float& R) { spine = n >= 2 && m > LEAF * 2.5f;
                 if (spine) { R = std::max((sum - m * 2) / 6.2832f * 1.08f, m + s2 + .6f); return R + s2; }
                 R = n == 1 ? 0 : std::max(sum / 6.2832f * 1.08f, m * 1.2f + .6f); return std::max(LEAF, R + m); };
-            if (!ks.empty()) { bool sp = false, sp0 = false; float R0 = 0; o.r = ringR(o.sum, mx, sec, ks.size(), sp, o.R); if (sp) { o.spine = true; o.big = big; o.sum -= mx * 2; } o.r0 = ringR(sum0, mx0, sec0, ks.size(), sp0, R0); }
+            if (!ks.empty()) { bool sp = false, sp0 = false; float R0 = 0; o.r = ringR(o.sum, mx, sec, ks.size(), sp, o.R); if (sp) { o.spine = true; o.big = big; o.sum -= mx * 2; } o.r0 = ringR(sum0, mx0, sec0, ks.size(), sp0, R0);
+                auto pv = prev.find(pid); if (pv != prev.end() && ks.size() >= 2 && pv->second.spine == o.spine && pv->second.R >= o.R && pv->second.R <= o.R * 1.25f) { o.r += pv->second.R - o.R; o.R = pv->second.R; } }
             return L.lay[pid] = o;
         };
+        static std::unordered_map<int, std::pair<int, float>> kAng;   // child pid -> (parent pid, angle on the parent's ring)
+        { std::unordered_set<int> live; for (auto& p : S->procs) live.insert(p.pid); for (auto it = kAng.begin(); it != kAng.end();) it = live.count(it->first) ? std::next(it) : kAng.erase(it); }
         std::function<void(int, V3)> place = [&](int pid, V3 at) {
             Lay& o = L.lay[pid]; o.pos = at; float a = (fnv(std::to_string(pid)) % 628) / 100.f, R = o.R, sum = o.sum;
             auto ks = L.kids[pid];
             int big = o.spine ? o.big : -1; if (big >= 0) place(big, { at.x, at.y + LEVEL, at.z });
-            for (int k : ks) { if (k == big) continue; float half = L.lay[k].er * 2 / sum * 3.14159265f; a += half; place(k, { at.x + R * cosf(a), at.y + LEVEL, at.z + R * sinf(a) }); a += half; }
+            vector<int> ring; for (int k : ks) if (k != big) ring.push_back(k); size_t n = ring.size(); if (!n) return;
+            vector<float> A(n), hw(n); vector<char> known(n, 0); int nk = 0;
+            for (size_t i = 0; i < n; i++) { float half = L.lay[ring[i]].er * 2 / sum * 3.14159265f; a += half; A[i] = a; a += half; hw[i] = R > 0 ? L.lay[ring[i]].er / R * 1.05f : 0;
+                auto m = kAng.find(ring[i]); if (m != kAng.end() && m->second.first == pid) { known[i] = 1; nk++; } }
+            if (nk && R > 0) {
+                for (size_t i = 0; i < n; i++) if (known[i]) A[i] = kAng[ring[i]].second;
+                size_t s0 = 0; while (!known[s0]) s0++;   // walk the ring from a known child; each new one sits just after the one before it
+                for (size_t t = 1; t < n; t++) { size_t i = (s0 + t) % n, p = (s0 + t - 1) % n; if (!known[i]) A[i] = A[p] + hw[p] + hw[i]; }
+                for (int it = 0; it < 60; it++) { vector<size_t> ord(n); for (size_t i = 0; i < n; i++) { A[i] = fmodf(fmodf(A[i], 6.2832f) + 6.2832f, 6.2832f); ord[i] = i; }
+                    std::sort(ord.begin(), ord.end(), [&](size_t x, size_t y) { return A[x] < A[y]; }); bool mv = false;
+                    for (size_t j = 0; j < n && n > 1; j++) { size_t p = ord[j], q = ord[(j + 1) % n]; float d = A[q] - A[p] + (j + 1 == n ? 6.2832f : 0), need = hw[p] + hw[q];
+                        if (d < need - 1e-4f) { float push = (need - d) * .5f; A[p] -= push; A[q] += push; mv = true; } }
+                    if (!mv) break; } }
+            bool wide = ex.count(pid) > 0;   // an expanded ring is temporary: it is not remembered
+            for (size_t i = 0; i < n; i++) { if (!wide) kAng[ring[i]] = { pid, A[i] }; place(ring[i], { at.x + R * cosf(A[i]), at.y + LEVEL, at.z + R * sinf(A[i]) }); }
         };
         for (int r : roots) measure(r);
-        std::sort(roots.begin(), roots.end(), [&](int a, int b) { float ra = L.lay[a].r0, rb = L.lay[b].r0; return ra != rb ? ra > rb : a < b; });
-        struct P { float x, z, r; }; vector<P> placed; L.ext = 60;
-        for (int pid : roots) { float r = L.lay[pid].r0 + (exRoots ? 4.f : 0), x = 0, z = 0;
-            bool found = false;
-            for (int k = 0; k < 200000 && !found; k++) { float rad = sqrtf((float)k) * 2.2f, ang = k * 2.39996f; x = rad * cosf(ang); z = rad * sinf(ang); found = true;
-                for (auto& q : placed) if (hypotf(q.x - x, q.z - z) < q.r + r + 2.5f) { found = false; break; } }
+        // Where each tree stood last time (kept between rebuilds; trees are packed on the floor by their unexpanded radius r0).
+        struct P { float x, z, r; int ord; }; static std::unordered_map<int, P> mem; static int memOrd = 0;
+        { std::unordered_set<int> live(roots.begin(), roots.end()); for (auto it = mem.begin(); it != mem.end();) it = live.count(it->first) ? std::next(it) : mem.erase(it); }
+        // known trees first, in the order they were first placed; then new trees, biggest first
+        std::sort(roots.begin(), roots.end(), [&](int a, int b) { auto ma = mem.find(a), mb = mem.find(b); bool ka = ma != mem.end(), kb = mb != mem.end();
+            if (ka != kb) return ka; if (ka) return ma->second.ord < mb->second.ord; float ra = L.lay[a].r0, rb = L.lay[b].r0; return ra != rb ? ra > rb : a < b; });
+        vector<P> placed; L.ext = 60; std::unordered_map<int, V3> at;
+        auto freeAt = [&](float x, float z, float r) { for (auto& q : placed) if (hypotf(q.x - x, q.z - z) < q.r + r + 2.5f) return false; return true; };
+        for (int pid : roots) { float r = L.lay[pid].r0, x = 0, z = 0; bool found = false; auto m = mem.find(pid);
+            if (m != mem.end()) {   // nearest free spot to where it was: rings of growing radius around the old position
+                float ox = m->second.x, oz = m->second.z; if (freeAt(ox, oz, r)) { x = ox; z = oz; found = true; }
+                for (int ring = 1; ring <= 400 && !found; ring++) { float d = ring * 1.5f; int steps = std::max(8, (int)(d * 1.2f));
+                    float best = 1e9f; for (int s = 0; s < steps; s++) { float a = s * 6.2832f / steps, cx = ox + d * cosf(a), cz = oz + d * sinf(a);
+                        if (freeAt(cx, cz, r)) { float pull = hypotf(cx, cz); if (pull < best) { best = pull; x = cx; z = cz; found = true; } } } } }   // of the free spots at that distance, the one nearest the centre
+            if (!found) for (int k = 0; k < 200000 && !found; k++) { float rad = sqrtf((float)k) * 2.2f, ang = k * 2.39996f; x = rad * cosf(ang); z = rad * sinf(ang); found = freeAt(x, z, r); }
             if (!found) { float edge = 0; for (auto& q : placed) edge = std::max(edge, q.x + q.r); x = edge + r + 3; z = 0; }   // still unique, just outside everything
-            placed.push_back({ x, z, r }); L.ext = std::max(L.ext, hypotf(x, z) + r); place(pid, { x, -20, z }); }
+            int ord = m != mem.end() ? m->second.ord : ++memOrd; placed.push_back({ x, z, r, ord }); mem[pid] = { x, z, r, ord }; at[pid] = { x, -20, z }; }
+        // A selected tree on the floor: the whole floor spreads out evenly so its neighbours make room; the remembered spots stay as they are.
+        float spread = 1; if (exRoots) for (size_t i = 0; i < placed.size(); i++) for (size_t j = i + 1; j < placed.size(); j++) { float d = hypotf(placed[i].x - placed[j].x, placed[i].z - placed[j].z); if (d > .01f) spread = std::max(spread, (placed[i].r + placed[j].r + 10.5f) / d); }
+        spread = std::min(spread, 1.7f);
+        for (int pid : roots) { V3 p = at[pid]; p.x *= spread; p.z *= spread; L.ext = std::max(L.ext, hypotf(p.x, p.z) + mem[pid].r); place(pid, p); }
         L.sig = sig;
     }
     vector<Lane> lanes;
@@ -258,6 +291,15 @@ static void buildProc() {
         Lane l; l.key = "ipc:" + std::to_string(x.a) + "-" + std::to_string(x.b); l.a = "p:" + std::to_string(x.a); l.b = "p:" + std::to_string(x.b); l.color = C_UDP; l.w = .75f; l.lift = .3f; l.out = l.inn = r / 2; l.proto = "loopback TCP x" + std::to_string(x.n); l.from = a->name; l.to = b->name; lanes.push_back(l); }
     endNodes(L); setLanes(L, lanes);
 }
+// Pushes apart neighbours on a ring that are closer than minGap, by just what is missing; nobody else moves.
+template <class K> static void relaxRing(std::unordered_map<K, float>& a, float minGap) {
+    if (a.size() < 2) return; const float TAU = 6.2832f; vector<std::pair<float, K>> v;
+    for (int it = 0; it < 40; it++) { v.clear(); for (auto& [k, x] : a) v.push_back({ fmodf(fmodf(x, TAU) + TAU, TAU), k }); std::sort(v.begin(), v.end()); bool moved = false;
+        for (size_t i = 0; i < v.size(); i++) { auto& p = v[i]; auto& q = v[(i + 1) % v.size()]; float d = q.first - p.first; if (i + 1 == v.size()) d += TAU;
+            if (d < minGap - 1e-4f) { float push = (minGap - d) * .5f; a[p.second] -= push; a[q.second] += push; moved = true; } }
+        if (!moved) break; }
+    for (auto& [k, x] : a) x = fmodf(fmodf(x, TAU) + TAU, TAU);
+}
 static void buildNet() {
     Layer& L = LY[1]; L.gen++; vector<Lane> lanes; std::set<int> ps;
     for (auto& [pid, v] : SM.listen) if (S->get(pid)) ps.insert(pid);
@@ -265,10 +307,19 @@ static void buildNet() {
     for (auto& [pid, v] : SM.remote) if (S->get(pid)) ps.insert(pid);
     vector<int> pids(ps.begin(), ps.end());
     std::sort(pids.begin(), pids.end(), [&](int a, int b) { string na = lower(S->get(a)->name), nb = lower(S->get(b)->name); return na != nb ? na < nb : a < b; });
-    int N = (int)pids.size(); float Rp = std::max(46.f, N * 7.2f / 6.2832f); std::unordered_map<int, float> ang;
+    int N = (int)pids.size(); static float Rp = 0; float rpT = std::max(46.f, N * 7.2f / 6.2832f); if (Rp < rpT || Rp > rpT * 1.25f) Rp = rpT;   // the ring only shrinks when it is clearly too big
+    static std::unordered_map<int, float> pAng; std::unordered_map<int, float> ang;
+    { std::unordered_set<int> live(pids.begin(), pids.end()); for (auto it = pAng.begin(); it != pAng.end();) it = live.count(it->first) ? std::next(it) : pAng.erase(it); }
+    if (pAng.empty()) for (int i = 0; i < N; i++) pAng[pids[i]] = (float)i / N * 6.2832f;
+    else {   // runs of new processes are spread over the gap between their known neighbours in name order
+        for (int i = 0; i < N; i++) { if (pAng.count(pids[i])) continue; int b = i; while (b + 1 < N && !pAng.count(pids[b + 1])) b++;
+            int lo = -1, hi = -1; for (int k = 1; k <= N && lo < 0; k++) { int j = ((i - k) % N + N) % N; if (pAng.count(pids[j])) lo = j; } for (int k = 1; k <= N && hi < 0; k++) { int j = (b + k) % N; if (pAng.count(pids[j])) hi = j; }
+            float a0 = pAng[pids[lo]], a1 = pAng[pids[hi]], gap = a1 - a0; while (gap <= 0) gap += 6.2832f; if (lo == hi) gap = 6.2832f;
+            for (int j = i; j <= b; j++) pAng[pids[j]] = fmodf(a0 + gap * (j - i + 1) / (b - i + 2), 6.2832f); i = b; }
+        relaxRing(pAng, 6.2832f / N * .7f); }
     { Node& n = up(L, "pc", ICO, K_PC, {}, S3(6), C_CYAN); n.glow = 1; n.label = S->host; n.lp = 9; n.cnt = N; }
     for (int i = 0; i < N; i++) {
-        int pid = pids[i]; const Proc& p = *S->get(pid); float a = (float)i / N * 6.2832f; ang[pid] = a; V3 pos{ Rp * cosf(a), 0, Rp * sinf(a) }; string key = "n:" + std::to_string(pid);
+        int pid = pids[i]; const Proc& p = *S->get(pid); float a = pAng[pid]; ang[pid] = a; V3 pos{ Rp * cosf(a), 0, Rp * sinf(a) }; string key = "n:" + std::to_string(pid);
         auto li = SM.listen.find(pid); auto ri = SM.remote.find(pid); int nl = li == SM.listen.end() ? 0 : (int)li->second.size(), nr = ri == SM.remote.end() ? 0 : (int)ri->second.size();
         Node& n = up(L, key, OCTA, K_PROC, pos, S3(procSize(p) + .3f), nameColor(p.name)); n.pid = pid; n.name = p.name; n.label = noExe(p.name);
         n.glow = .4f + std::min(1.f, float((p.rd + p.wr) / 200000)); n.lp = 1 + nr * .3f + nl * .05f;
@@ -286,10 +337,12 @@ static void buildNet() {
     struct Host { string ip; int conns = 0; std::set<int> pids; float sx = 0, sz = 0; }; std::map<string, Host> hosts;
     for (auto& [pid, rs] : SM.remote) { if (!ang.count(pid)) continue; for (auto& c : rs) { Host& h = hosts[c.ra]; h.ip = c.ra; h.conns++; h.pids.insert(pid); h.sx += cosf(ang[pid]); h.sz += sinf(ang[pid]); } }
     vector<Host*> hl; for (auto& [k, h] : hosts) hl.push_back(&h);
-    std::sort(hl.begin(), hl.end(), [](Host* a, Host* b) { return atan2f(a->sz, a->sx) < atan2f(b->sz, b->sx); });
-    float Rh = std::max(Rp + 58, hl.size() * 6 / 6.2832f); L.ext = Rh;
-    for (size_t i = 0; i < hl.size(); i++) { Host& h = *hl[i]; float a0 = atan2f(h.sz, h.sx), even = -3.14159265f + (i + .5f) / hl.size() * 6.2832f, a = hl.size() > 24 ? even : a0 * .6f + even * .4f;
-        bool priv = isPrivate(h.ip); Node& n = up(L, "host:" + h.ip, ICO, K_HOST, { Rh * cosf(a), 16.f + (i % 3) * 11, Rh * sinf(a) }, S3(1.3f + std::min(2.f, h.conns * .25f)), priv ? C_SAFE : C_CYAN);
+    static float Rh = 0; float rhT = std::max(Rp + 58, hl.size() * 6 / 6.2832f); if (Rh < rhT || Rh > rhT * 1.25f) Rh = rhT; L.ext = Rh;
+    // a host keeps its angle; a new one appears beside the processes that talk to it
+    static std::unordered_map<string, float> hAng; { std::unordered_map<string, float> keep; for (auto* h : hl) { auto it = hAng.find(h->ip); keep[h->ip] = it != hAng.end() ? it->second : atan2f(h->sz, h->sx) + (h->sx == 0 && h->sz == 0 ? (fnv(h->ip) % 628) / 100.f : 0); } hAng.swap(keep); }
+    if (!hl.empty()) relaxRing(hAng, 6.2832f / hl.size() * .6f);
+    for (size_t i = 0; i < hl.size(); i++) { Host& h = *hl[i]; float a = hAng[h.ip];
+        bool priv = isPrivate(h.ip); Node& n = up(L, "host:" + h.ip, ICO, K_HOST, { Rh * cosf(a), 16.f + (fnv(h.ip) % 3) * 11, Rh * sinf(a) }, S3(1.3f + std::min(2.f, h.conns * .25f)), priv ? C_SAFE : C_CYAN);
         n.glow = .7f; n.label = h.ip; n.s1 = h.ip; n.cnt = h.conns; n.more = (int)h.pids.size(); n.lp = .8f + h.conns * .2f; }
     for (auto& [pid, rs] : SM.remote) {
         if (!ang.count(pid)) continue; const Proc& p = *S->get(pid); std::map<string, vector<const Conn*>> per; for (auto& c : rs) per[c.ra].push_back(&c);
