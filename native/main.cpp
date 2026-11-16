@@ -1609,6 +1609,8 @@ static string agentContext(size_t maxChars) {
     string s = string("tab: ") + agentViewName(view) + "\n";
     if (!statsLine.empty()) s += statsLine + "\n";
     if (!sel.empty()) { auto ni = LY[view].nodes.find(sel); s += "selected: " + (ni != LY[view].nodes.end() && !ni->second.label.empty() ? ni->second.label : sel) + "\n"; }
+    if (!sel.empty() && sel.rfind("p:", 0) == 0 && S) { const Proc* p = S->get(atoi(sel.c_str() + 2)); if (p) s += "memory: " + fmtB((double)p->ws) + " working set, " + fmtB((double)p->pv) + " private, " + std::to_string(p->th) + " threads\n"; }
+    if (g_capMode != 0) { std::lock_guard<std::mutex> l(g_pkMx); s += "packets captured: " + std::to_string(g_pkts.size()) + " (commands list_packets, read_packet)\n"; }
     if (!hexMode) for (auto& i : pitems) if (i.type == 0 || i.type == 1 || i.type == 3 || i.type == 4) s += i.a + (i.type == 3 && !i.b.empty() ? "  " + i.b : string()) + "\n";
     if (view == 6 && !TR.input.empty()) { s += "trace: " + TR.input + " - " + TR.status + ", " + std::to_string(TR.msgs.size()) + " messages\n"; if (!TR.msgs.empty()) s += "last step: " + TR.msgs.back().title + "\n"; }
     if (s.size() > maxChars) s = s.substr(0, maxChars - 3) + "...";
@@ -1635,6 +1637,11 @@ static AgentEnv agentCaptureEnv() {   // what the commands may look at: the scre
     AgentEnv e; e.viewName = agentViewName(view); e.sel = sel; e.stats = statsLine; e.snap = S;
     if (!hexMode) for (auto& i : pitems) if (i.type == 0 || i.type == 1 || i.type == 3 || i.type == 4) e.panel.push_back(i.a + (i.type == 3 && !i.b.empty() ? "  " + i.b : string()));
     { std::lock_guard<std::mutex> l(g_trMx); e.trace = g_tr; }
+    e.captureOn = g_capMode != 0;
+    { std::lock_guard<std::mutex> l(g_pkMx); size_t from = g_pkts.size() > 300 ? g_pkts.size() - 300 : 0;
+      for (size_t i = from; i < g_pkts.size(); i++) { const Pkt& k = g_pkts[i]; AgentPkt p; p.pid = k.pid; p.proto = k.proto; p.lp = k.lp; p.rp = k.rp; p.len = k.len; p.out = k.out != 0;
+          p.lip = ip4s(&k.lip); p.rip = ip4s(&k.rip); const Proc* pr = e.snap ? e.snap->get(k.pid) : nullptr; p.name = pr ? pr->name : string("unknown");
+          p.head.assign((const char*)k.data, std::min<size_t>(k.cap, 64)); e.packets.push_back(p); } }
     return e;
 }
 static void chatSubmit() {
