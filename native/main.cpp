@@ -1625,6 +1625,23 @@ static vector<wstring> wrapLines(const string& s, size_t w) {   // wraps each li
     return o;
 }
 static string agentInfoShown;
+// the agent asked for an action: build the same red dialog the buttons use, or refuse on the same safety checks
+static void agentPollProposal() {
+    string verb, key; int pid = 0; bool take = false;
+    { std::lock_guard<std::mutex> l(g_actMx); if (g_act.pending && !g_act.shown) { g_act.shown = true; take = true; verb = g_act.verb; key = g_act.key; pid = g_act.pid; } }
+    if (!take) return;
+    auto refuse = [&](const string& why) { std::lock_guard<std::mutex> l(g_actMx); g_act.refusal = why; g_act.decided = true; g_act.approved = false; };
+    if (cf.open) { refuse("another confirmation is open"); return; }
+    if (verb == "kill") { string why; if (procCritical(pid, why)) { refuse(why); return; } requestAction(key); }   // the existing kill dialog and its checks
+    else if (verb == "closeconn" || verb == "fwblock") { requestAction(key); if (!cf.open) { refuse("a safety check stopped it (see the message on screen)"); return; } }
+    else if (verb == "suspend" || verb == "resume") {
+        string why; if (verb == "suspend" && procCritical(pid, why)) { refuse(why); return; }
+        cf = Confirm(); cf.key = key; cf.title = (verb == "suspend" ? "Suspend " : "Resume ") + procLabel(pid) + "?";
+        cf.warn = verb == "suspend" ? string("The process is frozen until you resume it. Its work stops for now; nothing is lost.") : string("The process continues from where it stopped.");
+        cf.yes = verb == "suspend" ? "SUSPEND" : "RESUME"; cf.open = true;
+    }
+    else refuse("unknown action");
+}
 static void agentPoll() {   // moves a finished answer (or a connection test result) into the screen
     string r, e, info; bool done = false, infoNew = false;
     { std::lock_guard<std::mutex> l(g_agMx);
@@ -1763,6 +1780,7 @@ static void drawAgentHistory(float X0, float Y0, float Wd, float top, int rows, 
 static void drawUi() {
     mouseOverUi = false; bool savedClick = clickNow; if (cf.open) clickNow = false;
     agentPoll();   // answers and connection tests are collected on every page, not only with the dock
+    agentPollProposal();
     drawLabels();
     // top bar
     panelBg(12, 12, LW - 24, 36); float x = 24, y = 19;
@@ -1818,9 +1836,9 @@ static void drawUi() {
         for (auto& l : wl) { text(x + 20, yy, l, uiCol(T_RED)); yy += 16; } yy += 6; for (auto& l : dl) { text(x + 20, yy, l, uiCol(T_TEXT)); yy += 16; }
         if (cf.needAdmin) text(x + 20, yy + 4, string("This needs administrator rights."), T_WARN);
         float bx = x + 20, by = y + h - 40;
-        if (cf.needAdmin) { if (button(bx, by, "RELAUNCH AS ADMIN", false, T_WARN)) { cf.open = false; requestAdmin(); } }
-        else if (button(bx, by, cf.yes, false, T_RED)) { cf.open = false; performAction(cf.key); }
-        bx += 12; if (button(bx, by, "CANCEL", false)) cf.open = false;
+        if (cf.needAdmin) { if (button(bx, by, "RELAUNCH AS ADMIN", false, T_WARN)) { agentActDecided(false); cf.open = false; requestAdmin(); } }
+        else if (button(bx, by, cf.yes, false, T_RED)) { agentActDecided(true); cf.open = false; performAction(cf.key); }
+        bx += 12; if (button(bx, by, "CANCEL", false)) { agentActDecided(false); cf.open = false; }
     }
 }
 
@@ -2037,7 +2055,7 @@ static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             else if (wp >= 32 && wp < 127 && trInput.size() < 240) { trInput += (char)wp; trInputChanged(); }
             return 0; }
         if (wp == '[' || wp == ']') { const int ws[] = { 1, 5, 10, 30, 60 }; int i = 0; while (i < 4 && ws[i] != winSec) i++; winSec = ws[std::max(0, std::min(4, i + (wp == ']' ? 1 : -1)))]; }
-        else if (wp == 27 && cf.open) cf.open = false;
+        else if (wp == 27 && cf.open) { agentActDecided(false); cf.open = false; }
         else if (wp == 27 && hexMode) hexClose();
         else if (wp == 27) { query.clear(); panelScroll = 0; selectKey("", false); } else if (wp == 8) { if (!query.empty()) query.pop_back(); computeFocus(); } else if (wp >= 32 && wp < 127 && query.size() < 24 && !hexMode) { query += (char)tolower((int)wp); computeFocus(); } return 0;
     case WM_KEYDOWN: {
