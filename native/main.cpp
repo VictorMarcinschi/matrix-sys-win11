@@ -6,6 +6,7 @@
 #include "trace.h"
 #include "web.h"
 #include "agent.h"
+#include "models.h"
 #include <deque>
 #include <d3d11.h>
 #include <dxgi1_2.h>
@@ -2084,6 +2085,16 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     if (arg == L"--uninstall-service") { if (!isElevated()) return relaunchElevated(L"--uninstall-service") ? 0 : 1; return uninstallService() ? 0 : 1; }
     if (arg == L"--uninstall") return doUninstall();
     buildGeo(); elevated = isElevated(); fwLoad(); agentLoad();
+    if (arg == L"--download-test" && argc > 4) {   // test of the verified download: --download-test <https url> <file> <sha256>; writes <file>.result.txt
+        DlProgress pr; string err; bool ok = downloadVerified(narrow(argv[2]), argv[3], narrow(argv[4]), pr, err);
+        if (FILE* rf = _wfopen((wstring(argv[3]) + L".result.txt").c_str(), L"w")) { fprintf(rf, "%s %s\n", ok ? "ok" : "failed", err.c_str()); fclose(rf); }
+        return ok ? 0 : 1;
+    }
+    if (arg == L"--hardware") {   // what this computer has and which option it is recommended
+        HwInfo h = hwDetect(); const ModelOption& m = hwRecommend(h);
+        if (FILE* rf = _wfopen(L"hardware.result.txt", L"w")) { fprintf(rf, "RAM %.1f GB, %d cores, GPU %s (%.1f GB), recommended %s\n", h.ramGB, h.cores, h.gpu.c_str(), h.vramGB, m.id); fclose(rf); }
+        return 0;
+    }
     WNDCLASSW wc{}; wc.lpfnWndProc = wndProc; wc.hInstance = hi; wc.lpszClassName = L"MatrixSys"; wc.hCursor = LoadCursor(nullptr, IDC_ARROW); wc.hIcon = LoadIconW(hi, MAKEINTRESOURCEW(1)); RegisterClassW(&wc);
     hwnd = CreateWindowExW(0, L"MatrixSys", elevated ? L"MatrixSys \x2014 system visualizer (administrator)" : L"MatrixSys \x2014 system visualizer", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1500, 950, nullptr, nullptr, hi, nullptr);
     if (!initGfx()) { MessageBoxW(hwnd, L"Direct3D 11 initialisation failed.", L"MatrixSys", MB_OK); return 1; }

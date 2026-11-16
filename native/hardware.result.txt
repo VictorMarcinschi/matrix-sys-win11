@@ -1,0 +1,1 @@
+RAM 61.4 GB, 8 cores, GPU NVIDIA GeForce RTX 5080 (15.6 GB), recommended large
